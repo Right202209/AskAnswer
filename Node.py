@@ -38,13 +38,30 @@ def tavily_search_node(state: SearchState) -> dict:
     search_query = state["search_query"]
     try:
         print(f"正在搜索：{search_query}")
-        response = tavily_client(
+        response = tavily_client.search(
             query=search_query, search_depth="basic", max_results=5, include_answer=True
         )
-        #TODO 处理和格式化搜索结果
 
-        #TODO 格式化后的搜索结果字符串
-        search_results = "hi"
+        results = response.get("results", [])
+
+        search_results = f"查询关键词：{search_query}\n\n"
+
+        search_results += "搜索结果（Top 5）：\n\n"
+
+        if results:
+            for i, result in enumerate(results, 1):
+                title = result.get("title", "无标题")
+                url = result.get("url", "#")
+                content = result.get("content", "无内容摘要")
+                score = result.get("score", 0.0)
+
+                search_results += (
+                    f"{i}. **{title}** (相关度: {score:.3f})\n"
+                    f"   链接: {url}\n"
+                    f"   {content[:280]}{'...' if len(content) > 280 else ''}\n\n"
+                )
+        else:
+            search_results += "未找到任何搜索结果。\n"
 
         return {
             "search_results": search_results.strip(),
@@ -55,12 +72,13 @@ def tavily_search_node(state: SearchState) -> dict:
         }
     except Exception as e:
 
-        #TODO 处理错误
+        error_msg = f"搜索失败：{str(e)}"
+        print(f"Tavily 搜索异常: {error_msg}")
 
         return {
             "search_results": f"搜索失败：{e}",
             "step": "search_failed",
-            "messages": [AIMessage(content="❌ 搜索遇到问题...")]
+            "messages": [AIMessage(content=" 搜索遇到问题...")]
         }
 
 def generate_answer_node(state: SearchState) -> dict:

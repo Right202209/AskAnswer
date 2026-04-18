@@ -5,6 +5,10 @@ import uuid
 
 from langchain_core.messages import HumanMessage
 
+HEADER_LINE = "=" * 56
+SECTION_LINE = "-" * 56
+PROMPT = "你 > "
+
 try:
     from AskAnswer.graph import create_search_assistant
 except ImportError:
@@ -35,26 +39,35 @@ def run_query(app: object, query: str, thread_id: str) -> str:
 def interactive_loop(app: object) -> int:
     thread_id = str(uuid.uuid4())
 
+    print(HEADER_LINE)
+    print("AskAnswer 命令行助手")
+    print("输入问题后回车；输入 exit / quit / q 退出。")
+    print(HEADER_LINE)
+
     while True:
         try:
-            query = input("请输入问题（输入 exit 退出）：").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
+            query = input(PROMPT).strip()
+        except EOFError:
+            print("\n再见。")
             return 0
+        except KeyboardInterrupt:
+            print("\n已取消，输入 exit 退出。")
+            continue
 
         if not query:
             continue
 
         if query.lower() in {"exit", "quit", "q"}:
+            print("再见。")
             return 0
 
         try:
             answer = run_query(app, query, thread_id)
         except Exception as exc:
-            print(f"\n运行失败：{exc}\n")
+            print(f"\n{SECTION_LINE}\n运行失败\n{SECTION_LINE}\n{exc}\n")
             continue
 
-        print(f"\n{answer}\n")
+        print(f"\n{SECTION_LINE}\n回答\n{SECTION_LINE}\n{answer}\n")
 
 
 
@@ -72,7 +85,7 @@ def main() -> int:
     try:
         app = create_search_assistant()
     except Exception as exc:
-        print(f"初始化失败：{exc}")
+        print(f"{SECTION_LINE}\n初始化失败\n{SECTION_LINE}\n{exc}")
         return 1
 
     if args.question:
@@ -80,9 +93,9 @@ def main() -> int:
         try:
             answer = run_query(app, args.question, thread_id)
         except Exception as exc:
-            print(f"运行失败：{exc}")
+            print(f"{SECTION_LINE}\n运行失败\n{SECTION_LINE}\n{exc}")
             return 1
-        print(answer)
+        print(f"{SECTION_LINE}\n回答\n{SECTION_LINE}\n{answer}")
         return 0
 
     return interactive_loop(app)

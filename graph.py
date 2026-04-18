@@ -24,6 +24,7 @@ def create_search_assistant():
     workflow.add_node("sorcery", sorcery_answer_node)
     workflow.add_node("tools", tools_node)
 
+
     # 设置流程
     workflow.add_edge(START, "understand")
     workflow.add_edge("understand", "search")
@@ -34,6 +35,7 @@ def create_search_assistant():
         {
             "tools": "tools",
             "sorcery": "sorcery",
+            END: END,
         }
     )
     workflow.add_edge("tools", "answer")
