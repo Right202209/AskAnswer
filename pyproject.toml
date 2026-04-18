@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "askanswer"
+version = "0.1.0"
+description = "AskAnswer 命令行搜索助手"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain",
+    "langchain-core",
+    "langgraph",
+    "tavily-python",
+    "python-dotenv",
+]
+
+[project.scripts]
+askanswer = "askanswer.cli:main"
+
+[tool.setuptools]
+packages = ["askanswer"]

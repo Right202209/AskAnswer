@@ -1,2 +1,7 @@
 .env
-__init__.py
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/

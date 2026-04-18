@@ -1,16 +1,14 @@
-from langchain_core.messages import AIMessage, SystemMessage
 from langchain.messages import ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
-from AskAnswer.State import SearchState
-from AskAnswer.load import model, tavily_client
-from AskAnswer.tool import tools_by_name
+from .load import model, tavily_client
+from .state import SearchState
+from .tools import tools_by_name
 
 
-def understand_query_node(state: SearchState) ->dict:
-
+def understand_query_node(state: SearchState) -> dict:
     user_message = state["messages"][-1].content
-    understand_prompt = \
-    f"""分析用户的查询："{user_message}"
+    understand_prompt = f"""分析用户的查询："{user_message}"
     请完成两个任务：
     1. 简洁总结用户想要了解什么
     2. 生成最适合搜索引擎的关键词（中英文均可，要精准）
@@ -30,7 +28,7 @@ def understand_query_node(state: SearchState) ->dict:
         "search_query": search_query,
         "retry_count": 0,
         "step": "understood",
-        "messages": [AIMessage(content=f"我将为您搜索：{search_query}")]
+        "messages": [AIMessage(content=f"我将为您搜索：{search_query}")],
     }
 
 
@@ -45,7 +43,6 @@ def tavily_search_node(state: SearchState) -> dict:
         results = response.get("results", [])
 
         search_results = f"查询关键词：{search_query}\n\n"
-
         search_results += "搜索结果（Top 5）：\n\n"
 
         if results:
@@ -66,24 +63,24 @@ def tavily_search_node(state: SearchState) -> dict:
         return {
             "search_results": search_results.strip(),
             "step": "searched",
-            "messages": [
-                AIMessage(content="搜索完成~ 正在整理答案...")
-            ]
+            "messages": [AIMessage(content="搜索完成~ 正在整理答案...")],
         }
     except Exception as e:
-
         error_msg = f"搜索失败：{str(e)}"
         print(f"Tavily 搜索异常: {error_msg}")
 
         return {
             "search_results": f"搜索失败：{e}",
             "step": "search_failed",
-            "messages": [AIMessage(content=" 搜索遇到问题...")]
+            "messages": [AIMessage(content=" 搜索遇到问题...")],
         }
+
 
 def generate_answer_node(state: SearchState) -> dict:
     if state["step"] == "search_failed":
-        fallback_prompt = f"搜索API暂时不可用，请基于您的知识回答用户的问题：\n用户问题：{state['user_query']}"
+        fallback_prompt = (
+            f"搜索API暂时不可用，请基于您的知识回答用户的问题：\n用户问题：{state['user_query']}"
+        )
         response = model.invoke([SystemMessage(content=fallback_prompt)])
     else:
         answer_prompt = f"""基于以下搜索结果为用户提供完整、准确的答案：
@@ -95,8 +92,9 @@ def generate_answer_node(state: SearchState) -> dict:
     return {
         "final_answer": response.content,
         "step": "completed",
-        "messages": [AIMessage(content=response.content)]
+        "messages": [AIMessage(content=response.content)],
     }
+
 
 def sorcery_answer_node(state: SearchState) -> dict:
     retry_count = state.get("retry_count", 0)
@@ -105,7 +103,7 @@ def sorcery_answer_node(state: SearchState) -> dict:
         return {
             "final_answer": final_answer,
             "step": "completed",
-            "messages": [AIMessage(content=final_answer)]
+            "messages": [AIMessage(content=final_answer)],
         }
 
     prompt = f"""请评估当前答案是否足够好。
@@ -132,20 +130,23 @@ def sorcery_answer_node(state: SearchState) -> dict:
                 "search_query": new_search_query,
                 "retry_count": retry_count + 1,
                 "step": "retry_search",
-                "messages": [AIMessage(content=f"当前答案不够理想，改为搜索：{new_search_query}")]
+                "messages": [
+                    AIMessage(content=f"当前答案不够理想，改为搜索：{new_search_query}")
+                ],
             }
 
     final_answer = state.get("final_answer", "")
     return {
         "final_answer": final_answer,
         "step": "completed",
-        "messages": [AIMessage(content=final_answer)]
+        "messages": [AIMessage(content=final_answer)],
     }
 
+
 def tools_node(state: SearchState) -> dict:
-        res = []
-        for tool_call in state["messages"][-1].tool_calls:
-            tool = tools_by_name[tool_call["name"]]
-            observation = tool.invoke(tool_call["args"])
-            res.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
-        return {"messages": res}
+    res = []
+    for tool_call in state["messages"][-1].tool_calls:
+        tool = tools_by_name[tool_call["name"]]
+        observation = tool.invoke(tool_call["args"])
+        res.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
+    return {"messages": res}

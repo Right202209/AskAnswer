@@ -1,9 +1,14 @@
-from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 
-from AskAnswer.Node import understand_query_node, tavily_search_node, generate_answer_node, sorcery_answer_node, \
-    tools_node
-from AskAnswer.State import SearchState
+from .nodes import (
+    generate_answer_node,
+    sorcery_answer_node,
+    tavily_search_node,
+    tools_node,
+    understand_query_node,
+)
+from .state import SearchState
 
 
 def route(state: SearchState):
@@ -17,15 +22,12 @@ def route(state: SearchState):
 def create_search_assistant():
     workflow = StateGraph(SearchState)
 
-    # 添加节点
     workflow.add_node("understand", understand_query_node)
     workflow.add_node("search", tavily_search_node)
     workflow.add_node("answer", generate_answer_node)
     workflow.add_node("sorcery", sorcery_answer_node)
     workflow.add_node("tools", tools_node)
 
-
-    # 设置流程
     workflow.add_edge(START, "understand")
     workflow.add_edge("understand", "search")
     workflow.add_edge("search", "answer")
@@ -36,7 +38,7 @@ def create_search_assistant():
             "tools": "tools",
             "sorcery": "sorcery",
             END: END,
-        }
+        },
     )
     workflow.add_edge("tools", "answer")
 
@@ -46,11 +48,10 @@ def create_search_assistant():
         route,
         {
             "search": "search",
-            END: END
-        }
+            END: END,
+        },
     )
 
-    # 编译图
     memory = InMemorySaver()
     app = workflow.compile(checkpointer=memory)
     return app

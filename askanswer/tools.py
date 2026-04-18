@@ -1,13 +1,14 @@
-from langchain_core.tools import tool
+import json
 from urllib.parse import urlencode
 from urllib.request import urlopen
-import os, json
 
-from AskAnswer.load import openweather_api_key
+from langchain_core.tools import tool
+
+from .load import openweather_api_key
 
 
 @tool
-def check_weather(city: str ) ->str:
+def check_weather(city: str) -> str:
     """查询指定城市的实时天气。参数 city 为城市名，例如 Beijing。"""
 
     if not openweather_api_key:
@@ -42,6 +43,7 @@ def check_weather(city: str ) ->str:
         )
     except Exception as exc:
         return f"天气查询失败：{exc}"
+
 
 tools = [check_weather]
 tools_by_name = {tool.name: tool for tool in tools}

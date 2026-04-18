@@ -5,14 +5,11 @@ import uuid
 
 from langchain_core.messages import HumanMessage
 
+from .graph import create_search_assistant
+
 HEADER_LINE = "=" * 56
 SECTION_LINE = "-" * 56
 PROMPT = "你 > "
-
-try:
-    from AskAnswer.graph import create_search_assistant
-except ImportError:
-    from graph import create_search_assistant
 
 
 def run_query(app: object, query: str, thread_id: str) -> str:
@@ -33,7 +30,6 @@ def run_query(app: object, query: str, thread_id: str) -> str:
             return content
 
     return "未生成答案。"
-
 
 
 def interactive_loop(app: object) -> int:
@@ -70,12 +66,10 @@ def interactive_loop(app: object) -> int:
         print(f"\n{SECTION_LINE}\n回答\n{SECTION_LINE}\n{answer}\n")
 
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AskAnswer 命令行工具")
     parser.add_argument("question", nargs="?", help="要提问的内容")
     return parser
-
 
 
 def main() -> int:
