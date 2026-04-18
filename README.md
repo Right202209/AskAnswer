@@ -34,7 +34,7 @@ askanswer/
 ├── graph.py      # LangGraph 工作流编排
 ├── nodes.py      # 各节点：理解 / 搜索 / 生成 / 自评 / 工具
 ├── state.py      # SearchState 定义
-├── tools.py      # 工具集（check_weather）
+├── tools.py      # 工具集（天气 / 时间 / 计算 / 汇率 / IP）
 ├── load.py       # 模型、Tavily、API key 加载
 └── __main__.py   # python -m 入口
 ```

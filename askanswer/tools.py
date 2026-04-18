@@ -1,6 +1,10 @@
+import ast
 import json
+import operator
+from datetime import datetime
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool
 
@@ -45,5 +49,99 @@ def check_weather(city: str) -> str:
         return f"天气查询失败：{exc}"
 
 
-tools = [check_weather]
+@tool
+def get_current_time(timezone: str = "Asia/Shanghai") -> str:
+    """获取指定时区的当前时间。参数 timezone 形如 'Asia/Shanghai' / 'America/New_York' / 'UTC'，默认上海。"""
+
+    try:
+        now = datetime.now(ZoneInfo(timezone))
+        return f"{timezone} 当前时间：{now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    except Exception as exc:
+        return f"时间查询失败：{exc}"
+
+
+_ALLOWED_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval(node: ast.AST) -> float:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_OPS:
+        return _ALLOWED_OPS[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_OPS:
+        return _ALLOWED_OPS[type(node.op)](_safe_eval(node.operand))
+    raise ValueError("不支持的表达式")
+
+
+@tool
+def calculate(expression: str) -> str:
+    """计算数学表达式。支持 + - * / // % ** 和括号，例如 '(3+4)*2'。"""
+
+    try:
+        tree = ast.parse(expression, mode="eval")
+        result = _safe_eval(tree.body)
+        return f"{expression} = {result}"
+    except Exception as exc:
+        return f"计算失败：{exc}"
+
+
+@tool
+def convert_currency(amount: float, from_currency: str, to_currency: str) -> str:
+    """货币汇率换算。参数：amount 金额；from_currency 源币种代码(如 USD)；to_currency 目标币种代码(如 CNY)。"""
+
+    base = from_currency.upper()
+    target = to_currency.upper()
+    url = f"https://open.er-api.com/v6/latest/{base}"
+
+    try:
+        with urlopen(url, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        if data.get("result") != "success":
+            return f"汇率查询失败：{data.get('error-type', 'unknown error')}"
+
+        rate = data.get("rates", {}).get(target)
+        if rate is None:
+            return f"未找到 {base} → {target} 的汇率"
+
+        return f"{amount} {base} ≈ {amount * rate:.4f} {target}（汇率 {rate}）"
+    except Exception as exc:
+        return f"汇率查询失败：{exc}"
+
+
+@tool
+def lookup_ip(ip: str = "") -> str:
+    """查询 IP 地址的地理位置与运营商信息。参数 ip 留空则查询当前出口 IP。"""
+
+    target = ip.strip()
+    url = f"https://ipapi.co/{target + '/' if target else ''}json/"
+
+    try:
+        request = Request(url, headers={"User-Agent": "AskAnswer/0.1"})
+        with urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        if data.get("error"):
+            return f"IP 查询失败：{data.get('reason', 'unknown error')}"
+
+        return (
+            f"IP {data.get('ip')}：{data.get('country_name')} "
+            f"{data.get('region')} {data.get('city')}，"
+            f"运营商 {data.get('org')}，时区 {data.get('timezone')}"
+        )
+    except Exception as exc:
+        return f"IP 查询失败：{exc}"
+
+
+tools = [check_weather, get_current_time, calculate, convert_currency, lookup_ip]
 tools_by_name = {tool.name: tool for tool in tools}
