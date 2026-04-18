@@ -1,14 +1,13 @@
-import ast
-import json
-import operator
+import ast, csv, json, operator
 from datetime import datetime
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-
+from pathlib import Path
+import pandas as pd
 from langchain_core.tools import tool
 
-from .load import openweather_api_key
+from .load import openweather_api_key, model
 
 
 @tool
@@ -143,5 +142,36 @@ def lookup_ip(ip: str = "") -> str:
         return f"IP 查询失败：{exc}"
 
 
-tools = [check_weather, get_current_time, calculate, convert_currency, lookup_ip]
+@tool
+def read_file(path: str) -> str:
+    """
+    读取不同类型的文件并进行智能解析。
+    参数: path (str): 文件路径
+    返回: str: AI 对文件内容的分析结果
+    """
+    path = Path(path)
+    suf = path.suffix
+    if suf in [".txt", ".md"]:
+        with open(path, "r", encoding="utf-8") as file:
+             data = file.read()
+    elif suf == ".json":
+        with open(path, "r", encoding="utf-8") as file:
+            obj = json.load(file)
+            data = json.dumps(obj, ensure_ascii=False, indent=2)
+    elif suf == ".csv":
+        with open(path, "r", encoding="utf-8") as file:
+            rows = list(csv.reader(file))
+            data = json.dumps(rows, ensure_ascii=False)
+    elif suf == ".xlsx":
+            df = pd.read_excel(path)
+            data = df.to_csv(index=False)
+    else:
+          return f"不支持的文件类型: {suf}"
+    resp = model.invoke(f"分析这个文件，判断类型并解释内容，"
+                 f"包括结构、用途和关键信息。"
+                 f"如果是代码就解释逻辑，如果是数据文件就说明字段，如果是二进制文件就说明用途。"
+                 f"以下是文件:\n{data}")
+    return resp.content
+
+tools = [check_weather, get_current_time, calculate, convert_currency, lookup_ip, read_file]
 tools_by_name = {tool.name: tool for tool in tools}
