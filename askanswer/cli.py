@@ -9,8 +9,14 @@ import uuid
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.padding import Padding
 
 from .graph import create_search_assistant
+
+
+_console = Console()
 
 
 # ── Styling ────────────────────────────────────────────────────────
@@ -190,8 +196,7 @@ def stream_query(app, query: str, thread_id: str) -> str:
 
 def render_answer(answer: str) -> None:
     print()
-    for line in answer.splitlines() or [""]:
-        print(f"  {line}")
+    _console.print(Padding(Markdown(answer or "_(空答案)_"), (0, 2)))
     print()
 
 

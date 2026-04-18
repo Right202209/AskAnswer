@@ -13,6 +13,7 @@ dependencies = [
     "langgraph",
     "tavily-python",
     "python-dotenv",
+    "rich",
 ]
 
 [project.scripts]
