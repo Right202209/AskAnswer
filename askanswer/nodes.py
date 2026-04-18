@@ -3,7 +3,9 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from .load import model, tavily_client
 from .state import SearchState
-from .tools import tools_by_name
+from .tools import tools, tools_by_name
+
+_model_with_tools = model.bind_tools(tools)
 
 
 def understand_query_node(state: SearchState) -> dict:
@@ -76,21 +78,34 @@ def tavily_search_node(state: SearchState) -> dict:
 
 def generate_answer_node(state: SearchState) -> dict:
     if state["step"] == "search_failed":
-        fallback_prompt = (
-            f"搜索API暂时不可用，请基于您的知识回答用户的问题：\n用户问题：{state['user_query']}"
-        )
-        response = model.invoke([SystemMessage(content=fallback_prompt)])
+        context_line = "（搜索 API 暂不可用，请基于已有知识或调用工具回答。）"
     else:
-        answer_prompt = f"""基于以下搜索结果为用户提供完整、准确的答案：
-        用户问题：{state['user_query']}
-        搜索结果：\n{state['search_results']}
-        请综合搜索结果，提供准确、有用的回答..."""
-        response = model.invoke([SystemMessage(content=answer_prompt)])
+        context_line = f"以下是搜索结果，可作为参考：\n{state.get('search_results', '')}"
+
+    system_prompt = (
+        "你可以调用工具来协助用户。\n"
+        "可用工具：read_file（读取本地 .txt/.md/.json/.csv/.xlsx）、"
+        "check_weather、get_current_time、calculate、convert_currency、lookup_ip。\n"
+        "如果用户需要读本地文件或其它工具能提供的信息，直接调用对应工具；"
+        "否则结合搜索结果直接回答。\n\n"
+        f"用户查询解析：{state.get('user_query', '')}\n"
+        f"{context_line}"
+    )
+
+    msgs = [SystemMessage(content=system_prompt)] + list(state["messages"])
+    response = _model_with_tools.invoke(msgs)
+
+    tool_calls = getattr(response, "tool_calls", None) or []
+    if tool_calls:
+        return {
+            "step": "tool_called",
+            "messages": [response],
+        }
 
     return {
         "final_answer": response.content,
         "step": "completed",
-        "messages": [AIMessage(content=response.content)],
+        "messages": [response],
     }
 
 

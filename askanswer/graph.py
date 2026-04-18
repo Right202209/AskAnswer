@@ -11,11 +11,15 @@ from .nodes import (
 from .state import SearchState
 
 
-def route(state: SearchState):
+def route_from_answer(state: SearchState):
+    if state["step"] == "tool_called":
+        return "tools"
+    return "sorcery"
+
+
+def route_from_sorcery(state: SearchState):
     if state["step"] == "retry_search":
         return "search"
-    elif state["step"] == "tool_called":
-        return "tools"
     return END
 
 
@@ -33,23 +37,14 @@ def create_search_assistant():
     workflow.add_edge("search", "answer")
     workflow.add_conditional_edges(
         "answer",
-        route,
-        {
-            "tools": "tools",
-            "sorcery": "sorcery",
-            END: END,
-        },
+        route_from_answer,
+        {"tools": "tools", "sorcery": "sorcery"},
     )
     workflow.add_edge("tools", "answer")
-
-    workflow.add_edge("answer", "sorcery")
     workflow.add_conditional_edges(
         "sorcery",
-        route,
-        {
-            "search": "search",
-            END: END,
-        },
+        route_from_sorcery,
+        {"search": "search", END: END},
     )
 
     memory = InMemorySaver()
