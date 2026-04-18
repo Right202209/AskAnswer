@@ -148,8 +148,18 @@ def stream_query(app, query: str, thread_id: str) -> str:
                 continue
 
             if node == "understand":
-                sq = _truncate(update.get("search_query", ""))
-                print(_marker("Understand", sq))
+                intent = update.get("intent", "")
+                if intent == "file_read":
+                    detail = f"file_read: {_truncate(update.get('file_path', ''))}"
+                elif intent == "chat":
+                    detail = "chat"
+                else:
+                    detail = f"search: {_truncate(update.get('search_query', ''))}"
+                print(_marker("Understand", detail))
+            elif node == "file_read":
+                if update.get("final_answer"):
+                    final_answer = update["final_answer"]
+                print(_marker("FileRead", "读取完成"))
             elif node == "search":
                 if update.get("step") == "search_failed":
                     print(_marker("Search", "失败，回退到模型知识"))

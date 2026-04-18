@@ -8,29 +8,91 @@ from .tools import tools, tools_by_name
 _model_with_tools = model.bind_tools(tools)
 
 
+_LABEL_MAP = {
+    "意图": "intent",
+    "文件路径": "file_path",
+    "搜索词": "search_query",
+    "理解": "understanding",
+}
+
+
+def _parse_labeled(text: str) -> dict:
+    out: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        for zh, key in _LABEL_MAP.items():
+            matched = False
+            for sep in ("：", ":"):
+                prefix = zh + sep
+                if line.startswith(prefix):
+                    out[key] = line[len(prefix):].strip()
+                    matched = True
+                    break
+            if matched:
+                break
+    return out
+
+
 def understand_query_node(state: SearchState) -> dict:
     user_message = state["messages"][-1].content
-    understand_prompt = f"""分析用户的查询："{user_message}"
-    请完成两个任务：
-    1. 简洁总结用户想要了解什么
-    2. 生成最适合搜索引擎的关键词（中英文均可，要精准）
-    格式：
-    理解：[用户需求总结]
-    搜索词：[最佳搜索关键词]"""
+    prompt = (
+        f'分析用户的查询："{user_message}"\n\n'
+        "请判断用户意图属于以下哪一类：\n"
+        "- file_read：要求读取或分析本地文件（通常会给出路径或文件名，"
+        "如 /tmp/a.txt、./data.csv、report.md）\n"
+        "- chat：闲聊、常识性问题，或你已知可直接回答、不需要联网\n"
+        "- search：需要联网搜索获取实时、最新或不确定的信息\n\n"
+        "严格按以下格式输出，没有内容的字段留空：\n"
+        "意图：file_read|chat|search\n"
+        "文件路径：（仅 file_read 时填写具体路径）\n"
+        "搜索词：（仅 search 时填写最佳关键词）\n"
+        "理解：（对用户需求的简要总结）\n"
+    )
+    response = model.invoke([SystemMessage(content=prompt)])
+    fields = _parse_labeled(response.content)
 
-    response = model.invoke([SystemMessage(content=understand_prompt)])
-    response_text = response.content
+    intent = (fields.get("intent") or "").lower().strip()
+    if intent not in {"file_read", "search", "chat"}:
+        intent = "search"
+    search_query = fields.get("search_query") or user_message
+    file_path = fields.get("file_path") or ""
+    understanding = fields.get("understanding") or user_message
 
-    search_query = user_message  # 默认使用原始查询
-    if "搜索词：" in response_text:
-        search_query = response_text.split("搜索词：")[1].strip()
+    if intent == "file_read":
+        hint = f"识别为读文件：{file_path or '(未能提取路径)'}"
+    elif intent == "chat":
+        hint = "识别为闲聊/常识问题，直接回答"
+    else:
+        hint = f"识别为搜索，关键词：{search_query}"
 
     return {
-        "user_query": response_text,
+        "user_query": understanding,
         "search_query": search_query,
+        "file_path": file_path,
+        "intent": intent,
         "retry_count": 0,
         "step": "understood",
-        "messages": [AIMessage(content=f"我将为您搜索：{search_query}")],
+        "messages": [AIMessage(content=hint)],
+    }
+
+
+def file_read_node(state: SearchState) -> dict:
+    path = (state.get("file_path") or "").strip()
+    if not path:
+        msg = "未能识别要读取的文件路径，请明确指出文件路径后重试。"
+        return {
+            "final_answer": msg,
+            "step": "completed",
+            "messages": [AIMessage(content=msg)],
+        }
+    try:
+        content = tools_by_name["read_file"].invoke({"path": path})
+    except Exception as exc:
+        content = f"读取 `{path}` 失败：{exc}"
+    return {
+        "final_answer": str(content),
+        "step": "completed",
+        "messages": [AIMessage(content=str(content))],
     }
 
 
@@ -67,8 +129,6 @@ def tavily_search_node(state: SearchState) -> dict:
             "messages": [AIMessage(content="搜索完成~ 正在整理答案...")],
         }
     except Exception as e:
-        error_msg = f"搜索失败：{str(e)}"
-
         return {
             "search_results": f"搜索失败：{e}",
             "step": "search_failed",
@@ -77,17 +137,23 @@ def tavily_search_node(state: SearchState) -> dict:
 
 
 def generate_answer_node(state: SearchState) -> dict:
-    if state["step"] == "search_failed":
+    intent = state.get("intent", "search")
+    search_results = state.get("search_results", "")
+
+    if intent == "chat":
+        context_line = "（这是闲聊或常识类问题，不需要搜索结果；可直接回答或调用合适的工具。）"
+    elif state.get("step") == "search_failed":
         context_line = "（搜索 API 暂不可用，请基于已有知识或调用工具回答。）"
+    elif not search_results:
+        context_line = "（没有可用的搜索结果，请基于已有知识或调用工具回答。）"
     else:
-        context_line = f"以下是搜索结果，可作为参考：\n{state.get('search_results', '')}"
+        context_line = f"以下是搜索结果，可作为参考：\n{search_results}"
 
     system_prompt = (
         "你可以调用工具来协助用户。\n"
         "可用工具：read_file（读取本地 .txt/.md/.json/.csv/.xlsx）、"
         "check_weather、get_current_time、calculate、convert_currency、lookup_ip。\n"
-        "如果用户需要读本地文件或其它工具能提供的信息，直接调用对应工具；"
-        "否则结合搜索结果直接回答。\n\n"
+        "若用户需要相应信息，直接调用对应工具；否则结合上下文直接回答。\n\n"
         f"用户查询解析：{state.get('user_query', '')}\n"
         f"{context_line}"
     )
@@ -110,9 +176,19 @@ def generate_answer_node(state: SearchState) -> dict:
 
 
 def sorcery_answer_node(state: SearchState) -> dict:
+    intent = state.get("intent", "search")
+    final_answer = state.get("final_answer", "")
+
+    # 只有 search 路径允许改写搜索词重跑；file_read / chat 直接通过
+    if intent != "search":
+        return {
+            "final_answer": final_answer,
+            "step": "completed",
+            "messages": [AIMessage(content=final_answer)],
+        }
+
     retry_count = state.get("retry_count", 0)
     if retry_count >= 1:
-        final_answer = state.get("final_answer", "")
         return {
             "final_answer": final_answer,
             "step": "completed",
@@ -123,7 +199,7 @@ def sorcery_answer_node(state: SearchState) -> dict:
     用户问题：{state.get('user_query', '')}
     当前搜索词：{state.get('search_query', '')}
     当前搜索结果：{state.get('search_results', '')}
-    当前答案：{state.get('final_answer', '')}
+    当前答案：{final_answer}
 
     如果答案已经足够好，请严格输出：
     评分：pass
@@ -148,7 +224,6 @@ def sorcery_answer_node(state: SearchState) -> dict:
                 ],
             }
 
-    final_answer = state.get("final_answer", "")
     return {
         "final_answer": final_answer,
         "step": "completed",

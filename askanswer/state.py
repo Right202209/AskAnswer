@@ -10,3 +10,5 @@ class SearchState(TypedDict):
     final_answer: str    # 最终生成的答案
     retry_count: int     # 重新搜索次数
     step: str            # 标记当前步骤
+    intent: str          # file_read | search | chat
+    file_path: str       # 当意图为 file_read 时的目标路径
