@@ -35,7 +35,6 @@ def understand_query_node(state: SearchState) -> dict:
 def tavily_search_node(state: SearchState) -> dict:
     search_query = state["search_query"]
     try:
-        print(f"正在搜索：{search_query}")
         response = tavily_client.search(
             query=search_query, search_depth="basic", max_results=5, include_answer=True
         )
@@ -67,7 +66,6 @@ def tavily_search_node(state: SearchState) -> dict:
         }
     except Exception as e:
         error_msg = f"搜索失败：{str(e)}"
-        print(f"Tavily 搜索异常: {error_msg}")
 
         return {
             "search_results": f"搜索失败：{e}",
