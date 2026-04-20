@@ -1,5 +1,8 @@
 import ast, csv, json, operator
 import os
+import platform
+import shlex
+import subprocess
 from datetime import datetime
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -47,7 +50,6 @@ def check_weather(city: str) -> str:
     except Exception as exc:
         return f"天气查询失败：{exc}"
 
-
 @tool
 def get_current_time(timezone: str = "Asia/Shanghai") -> str:
     """获取指定时区的当前时间。参数 timezone 形如 'Asia/Shanghai' / 'America/New_York' / 'UTC'，默认上海。"""
@@ -70,7 +72,6 @@ _ALLOWED_OPS = {
     ast.USub: operator.neg,
     ast.UAdd: operator.pos,
 }
-
 
 def _safe_eval(node: ast.AST) -> float:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
@@ -156,8 +157,6 @@ def read_file(path: str) -> str:
                  f"以下是文件:\n{data}")
     return resp.content
 
-
-
 def markitdown(file_path: str) -> str:
     md = MarkItDown(enable_plugins=True)
     result = md.convert(file_path)
@@ -174,5 +173,52 @@ def pwd()->str:
     current_directory = os.getcwd()
     return current_directory
 
-tools = [check_weather, get_current_time, calculate, convert_currency, lookup_ip, read_file, pwd]
+
+@tool
+def gen_shell_commands_run(input: str) -> str:
+    """
+    根据用户指令生成 shell 命令
+    """
+    # TODO: 处理 rm, shutdown, 重定向覆盖等高风险操作
+    #       引入 Human in loop
+
+    current_os = platform.system() + " " + platform.release() + " " + platform.machine()
+    command = model.invoke(f"根据以下用户指令生成严格的在{current_os}环境下的 shell 命令，不要解释:{input}\n ")
+
+    args = shlex.split(command.content)
+    process = subprocess.Popen(
+        args,
+        # shell=True, # 危险
+        shell = False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout = 30,
+        text=True,
+    )
+    result = process.returncode ==0
+
+    # logs = ""
+    # for line in process.stdout:
+    #     logs += line.strip() +"\n"
+
+    stdout, stderr = process.communicate()
+
+    return {
+        "result": result,
+        "stdout": stdout,
+        "stderr": stderr,
+        # "logs": logs,
+    }
+
+tools = [
+    check_weather,
+    get_current_time,
+    calculate,
+    convert_currency,
+    lookup_ip,
+    read_file,
+    pwd,
+    gen_shell_commands_run,
+]
+
 tools_by_name = {tool.name: tool for tool in tools}

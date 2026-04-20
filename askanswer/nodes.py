@@ -20,6 +20,8 @@ def _mcp_tool_specs() -> list[dict]:
     ``bind_tools`` on OpenAI-compatible models accepts these alongside
     LangChain ``BaseTool`` objects, so we can extend the model's toolset
     at runtime without wrapping each MCP tool in pydantic.
+
+     # try use langchain-mcp-adapters to enables agents to use tools defined on MCP servers
     """
     specs: list[dict] = []
     try:
