@@ -239,12 +239,3 @@ def tools_node(state: SearchState) -> dict:
         res.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
     return {"messages": res}
 
-def check_tool_need_node(state: SearchState) -> dict:
-    tool_calls = getattr(state["messages"][-1], "tool_calls", None) or []
-    if tool_calls:
-        return {
-            "step": "tool_called",
-        }
-    return {
-        "step": "answer",
-    }

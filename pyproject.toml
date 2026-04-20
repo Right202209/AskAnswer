@@ -15,6 +15,7 @@ dependencies = [
     "tavily-python",
     "python-dotenv",
     "rich",
+    "markitdown",
 ]
 
 [project.scripts]
