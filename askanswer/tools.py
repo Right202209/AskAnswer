@@ -1,10 +1,10 @@
 import ast, csv, json, operator
+import os
 from datetime import datetime
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from pathlib import Path
-import pandas as pd
+from markitdown import MarkItDown
 from langchain_core.tools import tool
 
 from .load import openweather_api_key, model
@@ -149,29 +149,39 @@ def read_file(path: str) -> str:
     参数: path (str): 文件路径
     返回: str: AI 对文件内容的分析结果
     """
-    path = Path(path)
-    suf = path.suffix
-    if suf in [".txt", ".md"]:
-        with open(path, "r", encoding="utf-8") as file:
-             data = file.read()
-    elif suf == ".json":
-        with open(path, "r", encoding="utf-8") as file:
-            obj = json.load(file)
-            data = json.dumps(obj, ensure_ascii=False, indent=2)
-    elif suf == ".csv":
-        with open(path, "r", encoding="utf-8") as file:
-            rows = list(csv.reader(file))
-            data = json.dumps(rows, ensure_ascii=False)
-    elif suf == ".xlsx":
-            df = pd.read_excel(path)
-            data = df.to_csv(index=False)
-    else:
-          return f"不支持的文件类型: {suf}"
-    resp = model.invoke(f"分析这个文件，判断类型并解释内容，"
+    data = markitdown(path)
+    resp = model.invoke(f"分析这个文件,解释内容，"
                  f"包括结构、用途和关键信息。"
                  f"如果是代码就解释逻辑，如果是数据文件就说明字段，如果是二进制文件就说明用途。"
                  f"以下是文件:\n{data}")
     return resp.content
 
-tools = [check_weather, get_current_time, calculate, convert_currency, lookup_ip, read_file]
+
+
+def markitdown(file_path: str) -> dict[str, bool | str]:
+
+    client = model
+    md = MarkItDown(
+        enable_plugins = True,
+        llm_client=client,
+        llm_model="gpt-5.4",
+        llm_prompt="")
+    result = md.convert(file_path)
+
+    md_text = result.text_content
+
+    return md_text
+
+
+@tool
+def pwd()->str:
+    """
+    获取当前工作目录的路径
+    :param pwd:
+    :return: 当前工作目录的路径
+    """
+    current_directory = os.getcwd()
+    return current_directory
+
+tools = [check_weather, get_current_time, calculate, convert_currency, lookup_ip, read_file, pwd]
 tools_by_name = {tool.name: tool for tool in tools}
