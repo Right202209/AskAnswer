@@ -101,6 +101,8 @@ def help_block() -> None:
     print(f"   {C.CYAN}/help{C.RESET}    显示此帮助")
     print(f"   {C.CYAN}/clear{C.RESET}   清屏并开始新会话")
     print(f"   {C.CYAN}/status{C.RESET}  查看当前会话信息")
+    #TODO /mcp <url>  来添加 mcp
+    # print(f"   {C.CYAN}/mcp{C.RESET}  mcp")
     print(f"   {C.CYAN}/exit{C.RESET}    退出 (也可 /quit, /q, Ctrl-D)")
     print()
 
