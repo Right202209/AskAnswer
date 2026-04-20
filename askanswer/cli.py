@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
 import re
 import sys
@@ -14,6 +15,7 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 
 from .graph import create_search_assistant
+from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
 
 
 _console = Console()
@@ -102,9 +104,18 @@ def help_block() -> None:
     print(f"   {C.CYAN}/help{C.RESET}    显示此帮助")
     print(f"   {C.CYAN}/clear{C.RESET}   清屏并开始新会话")
     print(f"   {C.CYAN}/status{C.RESET}  查看当前会话信息")
-    #TODO /mcp <url>  来添加 mcp
-    # print(f"   {C.CYAN}/mcp{C.RESET}  mcp")
+    print(f"   {C.CYAN}/mcp{C.RESET}     管理 MCP 服务 ({C.DIM}/mcp 查看子命令{C.RESET})")
     print(f"   {C.CYAN}/exit{C.RESET}    退出 (也可 /quit, /q, Ctrl-D)")
+    print()
+
+
+def mcp_help_block() -> None:
+    print()
+    print(f" {C.BOLD}/mcp{C.RESET}")
+    print(f"   {C.CYAN}/mcp <url> [name]{C.RESET}      连接一个 MCP 服务 (HTTP/SSE)")
+    print(f"   {C.CYAN}/mcp list{C.RESET}              列出已连接的 MCP 服务")
+    print(f"   {C.CYAN}/mcp tools [server]{C.RESET}    列出工具 (可选按 server 过滤)")
+    print(f"   {C.CYAN}/mcp remove <name>{C.RESET}     断开指定服务")
     print()
 
 
@@ -113,6 +124,12 @@ def status_block(thread_id: str) -> None:
     print(f" {C.BOLD}Status{C.RESET}")
     print(f"   {C.DIM}thread:{C.RESET}  {thread_id}")
     print(f"   {C.DIM}cwd:{C.RESET}     {Path.cwd()}")
+    servers = _mcp_manager().list_servers()
+    if servers:
+        summary = ", ".join(f"{s['name']}({s['tools']})" for s in servers)
+        print(f"   {C.DIM}mcp:{C.RESET}     {summary}")
+    else:
+        print(f"   {C.DIM}mcp:{C.RESET}     {C.DIM}（未连接，/mcp <url> 添加）{C.RESET}")
     print()
 
 
@@ -236,25 +253,128 @@ def _prompt_boxed_input() -> str:
 
 
 def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
-    cmd = cmd.lower()
-    if cmd in {"/exit", "/quit", "/q"}:
+    stripped = cmd.strip()
+    head, _, tail = stripped.partition(" ")
+    head_lc = head.lower()
+    tail = tail.strip()
+
+    if head_lc in {"/exit", "/quit", "/q"}:
         print(f"\n{C.DIM}再见。{C.RESET}")
         return False, thread_id
-    if cmd == "/help":
+    if head_lc == "/help":
         help_block()
-    elif cmd == "/clear":
+    elif head_lc == "/clear":
         os.system("cls" if os.name == "nt" else "clear")
         welcome_box()
         thread_id = str(uuid.uuid4())
         print(f"\n  {C.DIM}已开始新会话：{thread_id[:8]}…{C.RESET}\n")
-    elif cmd == "/status":
+    elif head_lc == "/status":
         status_block(thread_id)
+    elif head_lc == "/mcp":
+        handle_mcp_command(tail)
     else:
         print(
-            f"\n  {C.RED}未知命令：{C.RESET}{cmd}  "
+            f"\n  {C.RED}未知命令：{C.RESET}{stripped}  "
             f"({C.CYAN}/help{C.RESET} 查看可用命令)\n"
         )
     return True, thread_id
+
+
+def handle_mcp_command(args: str) -> None:
+    if not args:
+        _print_mcp_servers()
+        mcp_help_block()
+        return
+
+    first, _, rest = args.partition(" ")
+    rest = rest.strip()
+    first_lc = first.lower()
+
+    if first_lc in {"list", "ls"}:
+        _print_mcp_servers()
+    elif first_lc in {"tools", "tool"}:
+        _print_mcp_tools(rest or None)
+    elif first_lc in {"remove", "rm", "disconnect"}:
+        if not rest:
+            print(f"\n  {C.RED}用法：{C.RESET}/mcp remove <name>\n")
+            return
+        _remove_mcp_server(rest)
+    elif first_lc in {"help", "-h", "--help"}:
+        mcp_help_block()
+    elif first.startswith(("http://", "https://")):
+        _add_mcp_url(first, rest or None)
+    else:
+        print(
+            f"\n  {C.RED}无法识别 /mcp 参数：{C.RESET}{args}\n"
+            f"  {C.DIM}提示：URL 需以 http:// 或 https:// 开头{C.RESET}"
+        )
+        mcp_help_block()
+
+
+def _add_mcp_url(url: str, name: str | None) -> None:
+    try:
+        registered = _mcp_manager().add_url(url, name=name)
+    except Exception as exc:
+        render_error(f"MCP 连接失败: {exc}")
+        return
+    tools = _mcp_manager().list_tools(server=registered)
+    print()
+    print(
+        f"  {C.GREEN}✓ 已连接 MCP:{C.RESET} {C.BOLD}{registered}{C.RESET}  "
+        f"{C.DIM}{url}{C.RESET}"
+    )
+    if tools:
+        print(f"  {C.DIM}工具 ({len(tools)}):{C.RESET}")
+        for t in tools:
+            desc = _truncate(t.get("description") or "", 56)
+            print(f"    {C.CYAN}{t['name']}{C.RESET}  {C.DIM}{desc}{C.RESET}")
+    else:
+        print(f"  {C.DIM}（未发现工具）{C.RESET}")
+    print()
+
+
+def _remove_mcp_server(name: str) -> None:
+    ok = _mcp_manager().remove(name)
+    print()
+    if ok:
+        print(f"  {C.GREEN}✓ 已断开 MCP:{C.RESET} {name}")
+    else:
+        print(f"  {C.RED}未找到 MCP 服务：{C.RESET}{name}")
+    print()
+
+
+def _print_mcp_servers() -> None:
+    servers = _mcp_manager().list_servers()
+    print()
+    if not servers:
+        print(f"  {C.DIM}（暂未连接 MCP 服务）{C.RESET}")
+        print()
+        return
+    print(f"  {C.BOLD}MCP Servers ({len(servers)}){C.RESET}")
+    for s in servers:
+        print(
+            f"   {C.GREEN}●{C.RESET} {C.BOLD}{s['name']}{C.RESET}  "
+            f"{C.DIM}{s['transport']} · {s['tools']} tools{C.RESET}"
+        )
+        if s.get("url"):
+            print(f"     {C.DIM}{s['url']}{C.RESET}")
+    print()
+
+
+def _print_mcp_tools(server: str | None) -> None:
+    tools = _mcp_manager().list_tools(server=server)
+    print()
+    if not tools:
+        hint = f"{server} 无工具 / 未连接" if server else "暂无 MCP 工具，使用 /mcp <url> 添加"
+        print(f"  {C.DIM}（{hint}）{C.RESET}")
+        print()
+        return
+    scope = f" ({server})" if server else ""
+    print(f"  {C.BOLD}MCP Tools{scope} · {len(tools)}{C.RESET}")
+    for t in tools:
+        desc = _truncate(t.get("description") or "", 56)
+        print(f"    {C.CYAN}{t['name']}{C.RESET}  {C.DIM}{desc}{C.RESET}")
+    print()
 
 
 def interactive_loop(app) -> int:
@@ -300,6 +420,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    atexit.register(_mcp_shutdown)
 
     try:
         app = create_search_assistant()
