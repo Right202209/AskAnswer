@@ -1,5 +1,4 @@
-from langchain.messages import ToolMessage
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from .load import model, tavily_client
 from .state import SearchState
@@ -104,8 +103,11 @@ def tavily_search_node(state: SearchState) -> dict:
         )
 
         results = response.get("results", [])
+        tavily_answer = (response.get("answer") or "").strip()
 
         search_results = f"查询关键词：{search_query}\n\n"
+        if tavily_answer:
+            search_results += f"Tavily 摘要：{tavily_answer}\n\n"
         search_results += "搜索结果（Top 5）：\n\n"
 
         if results:

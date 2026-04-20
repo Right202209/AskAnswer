@@ -158,19 +158,10 @@ def read_file(path: str) -> str:
 
 
 
-def markitdown(file_path: str) -> dict[str, bool | str]:
-
-    client = model
-    md = MarkItDown(
-        enable_plugins = True,
-        llm_client=client,
-        llm_model="gpt-5.4",
-        llm_prompt="")
+def markitdown(file_path: str) -> str:
+    md = MarkItDown(enable_plugins=True)
     result = md.convert(file_path)
-
-    md_text = result.text_content
-
-    return md_text
+    return result.text_content
 
 
 @tool

@@ -34,6 +34,7 @@ class C:
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_HIT_RE = re.compile(r"^\d+\.\s+\*\*", re.MULTILINE)
 
 
 def _strip_ansi(s: str) -> str:
@@ -167,7 +168,7 @@ def stream_query(app, query: str, thread_id: str) -> str:
                     print(_marker("Search", "失败，回退到模型知识"))
                 else:
                     sr = update.get("search_results", "") or ""
-                    hits = sr.count("**") // 2
+                    hits = len(_HIT_RE.findall(sr))
                     detail = f"Top {hits} 结果" if hits else "完成"
                     print(_marker("Search", detail))
             elif node == "answer":
