@@ -36,8 +36,23 @@ python -m askanswer               # 等价入口
 | --- | --- |
 | `/help` | 显示帮助 |
 | `/clear` | 清屏并开启新会话（新 thread） |
-| `/status` | 查看当前会话信息 |
+| `/status` | 查看当前会话信息（含已连接的 MCP 服务） |
+| `/mcp` | 管理 MCP 服务（见下文） |
 | `/exit` / `/quit` / `/q` | 退出（也可 Ctrl-D） |
+
+### MCP 支持
+
+通过 `/mcp <url>` 即可热接入一个 MCP 服务。URL 传输自动识别：路径以 `/sse` 结尾走 SSE，其余按 streamable-HTTP 处理；也支持从代码里直接 `add_stdio(...)` 启动子进程 MCP。
+
+```text
+/mcp https://example.com/mcp            # 连接（自动推导服务名）
+/mcp https://example.com/mcp my-server  # 指定服务名
+/mcp list                               # 列出已连接服务
+/mcp tools [server]                     # 列出工具（可按 server 过滤）
+/mcp remove <name>                      # 断开指定服务
+```
+
+多个 server 的工具在聚合时以 `<server>__<tool>` 形式暴露；`call_tool` 按前缀路由到对应 session。每个 server 的上下文管理器在同一 asyncio 任务内进入/退出，避免 anyio cancel-scope 跨任务的问题。
 
 ## 结构
 
@@ -48,6 +63,7 @@ askanswer/
 ├── nodes.py      # 节点实现：理解分流 / 搜索 / 读文件 / 回答 / 自评 / 工具
 ├── state.py      # SearchState 定义（含 intent / file_path）
 ├── tools.py      # 工具集
+├── mcp.py        # MCP 客户端管理器：URL (HTTP/SSE) + stdio，多服务聚合
 ├── load.py       # 模型、Tavily、API key 加载
 └── __main__.py   # python -m 入口
 ```

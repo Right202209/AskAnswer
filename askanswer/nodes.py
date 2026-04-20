@@ -1,10 +1,9 @@
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from .load import model, tavily_client
+from .mcp import get_manager as _mcp_manager
 from .state import SearchState
 from .tools import tools, tools_by_name
-
-_model_with_tools = model.bind_tools(tools)
 
 
 _LABEL_MAP = {
@@ -13,6 +12,43 @@ _LABEL_MAP = {
     "搜索词": "search_query",
     "理解": "understanding",
 }
+
+
+def _mcp_tool_specs() -> list[dict]:
+    """Convert registered MCP tools into OpenAI-style function-call dict specs.
+
+    ``bind_tools`` on OpenAI-compatible models accepts these alongside
+    LangChain ``BaseTool`` objects, so we can extend the model's toolset
+    at runtime without wrapping each MCP tool in pydantic.
+    """
+    specs: list[dict] = []
+    try:
+        mcp_tools = _mcp_manager().list_tools()
+    except Exception:
+        return specs
+
+    for t in mcp_tools:
+        schema = t.get("input_schema")
+        if not isinstance(schema, dict) or not schema:
+            schema = {"type": "object", "properties": {}}
+        specs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description") or t["name"],
+                    "parameters": schema,
+                },
+            }
+        )
+    return specs
+
+
+def _mcp_tool_names() -> set[str]:
+    try:
+        return {t["name"] for t in _mcp_manager().list_tools()}
+    except Exception:
+        return set()
 
 
 def _parse_labeled(text: str) -> dict:
@@ -151,17 +187,24 @@ def generate_answer_node(state: SearchState) -> dict:
     else:
         context_line = f"以下是搜索结果，可作为参考：\n{search_results}"
 
+    mcp_specs = _mcp_tool_specs()
+    mcp_line = ""
+    if mcp_specs:
+        names = ", ".join(spec["function"]["name"] for spec in mcp_specs)
+        mcp_line = f"\n额外的 MCP 工具可直接按名称调用：{names}。"
+
     system_prompt = (
         "你可以调用工具来协助用户。\n"
         "可用工具：read_file（读取本地 .txt/.md/.json/.csv/.xlsx）、"
         "check_weather、get_current_time、calculate、convert_currency、lookup_ip。\n"
-        "若用户需要相应信息，直接调用对应工具；否则结合上下文直接回答。\n\n"
+        f"若用户需要相应信息，直接调用对应工具；否则结合上下文直接回答。{mcp_line}\n\n"
         f"用户查询解析：{state.get('user_query', '')}\n"
         f"{context_line}"
     )
 
+    bound = model.bind_tools(tools + mcp_specs) if mcp_specs else model.bind_tools(tools)
     msgs = [SystemMessage(content=system_prompt)] + list(state["messages"])
-    response = _model_with_tools.invoke(msgs)
+    response = bound.invoke(msgs)
 
     tool_calls = getattr(response, "tool_calls", None) or []
     if tool_calls:
@@ -235,9 +278,22 @@ def sorcery_answer_node(state: SearchState) -> dict:
 
 def tools_node(state: SearchState) -> dict:
     res = []
+    mcp_names = _mcp_tool_names()
     for tool_call in state["messages"][-1].tool_calls:
-        tool = tools_by_name[tool_call["name"]]
-        observation = tool.invoke(tool_call["args"])
+        name = tool_call["name"]
+        args = tool_call.get("args") or {}
+        if name in tools_by_name:
+            try:
+                observation = tools_by_name[name].invoke(args)
+            except Exception as exc:
+                observation = f"工具 {name} 执行失败：{exc}"
+        elif name in mcp_names:
+            try:
+                observation = _mcp_manager().call_tool(name, args)
+            except Exception as exc:
+                observation = f"MCP 工具 {name} 调用失败：{exc}"
+        else:
+            observation = f"未知工具：{name}"
         res.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
     return {"messages": res}
 
