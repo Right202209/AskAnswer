@@ -1,4 +1,4 @@
-import ast, csv, json, operator
+import ast, csv, json, operator, re
 import os
 import platform
 import shlex
@@ -174,41 +174,128 @@ def pwd()->str:
     return current_directory
 
 
+_DANGEROUS_PATTERNS = [
+    (r"\brm\b", "rm 删除命令"),
+    (r"\brmdir\b", "rmdir 目录删除"),
+    (r"\bshutdown\b", "shutdown 关机"),
+    (r"\breboot\b", "reboot 重启"),
+    (r"\bhalt\b", "halt 停机"),
+    (r"\bpoweroff\b", "poweroff 关机"),
+    (r"\bmkfs\w*\b", "mkfs 格式化"),
+    (r"(?:^|\s)dd\s+if=", "dd 底层磁盘写入"),
+    (r":\s*\(\)\s*\{", "fork bomb"),
+    (r"\bsudo\b", "sudo 提权"),
+    (r"(?<!>)>(?![>&])", "重定向覆盖 `>`（会覆盖文件）"),
+    (r"\bkill\s+-9\b", "kill -9 强制终止"),
+    (r"\bchmod\s+-R\b", "chmod -R 递归改权限"),
+    (r"\bchown\s+-R\b", "chown -R 递归改属主"),
+    (r">\s*/dev/sd", "写入磁盘设备"),
+    (r"\bmv\s+\S+\s+/\b", "mv 到根目录"),
+]
+
+
+def _check_dangerous(command: str) -> str | None:
+    for pattern, desc in _DANGEROUS_PATTERNS:
+        if re.search(pattern, command):
+            return desc
+    return None
+
+
+def _clean_command(raw: str) -> str:
+    s = raw.strip()
+    if s.startswith("```"):
+        lines = s.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    return s.lstrip("$").strip()
+
+
 @tool
 def gen_shell_commands_run(input: str) -> str:
     """
-    根据用户指令生成 shell 命令
+    根据用户指令生成并执行 shell 命令。
+    高风险操作（rm、shutdown、重定向覆盖等）会被拦截；
+    执行前会在终端显示命令与说明，并要求用户二次确认（输入 y 才执行）。
     """
-    # TODO: 处理 rm, shutdown, 重定向覆盖等高风险操作
-    #       引入 Human in loop
-
     current_os = platform.system() + " " + platform.release() + " " + platform.machine()
-    command = model.invoke(f"根据以下用户指令生成严格的在{current_os}环境下的 shell 命令，不要解释:{input}\n ")
-
-    args = shlex.split(command.content)
-    process = subprocess.Popen(
-        args,
-        # shell=True, # 危险
-        shell = False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout = 30,
-        text=True,
+    prompt = (
+        f"根据以下用户指令生成在 {current_os} 环境下可直接执行的单条 shell 命令。\n"
+        f"严格按以下两行格式输出，不要 markdown、不要多余内容：\n"
+        f"命令：<shell command>\n"
+        f"说明：<一句话解释它做什么>\n\n"
+        f"用户指令：{input}"
     )
-    result = process.returncode ==0
+    resp = model.invoke(prompt)
+    text = resp.content if hasattr(resp, "content") else str(resp)
 
-    # logs = ""
-    # for line in process.stdout:
-    #     logs += line.strip() +"\n"
+    command = ""
+    explanation = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        for prefix in ("命令：", "命令:"):
+            if stripped.startswith(prefix):
+                command = stripped[len(prefix):].strip()
+                break
+        for prefix in ("说明：", "说明:"):
+            if stripped.startswith(prefix):
+                explanation = stripped[len(prefix):].strip()
+                break
+    command = _clean_command(command or text)
 
-    stdout, stderr = process.communicate()
+    if not command:
+        return "未能生成有效的 shell 命令"
 
-    return {
-        "result": result,
-        "stdout": stdout,
-        "stderr": stderr,
-        # "logs": logs,
-    }
+    danger = _check_dangerous(command)
+    if danger:
+        return f"已拦截高风险命令（{danger}）：{command}"
+
+    print(f"\n建议执行的命令：{command}")
+    if explanation:
+        print(f"命令说明：{explanation}")
+    try:
+        reply = input("是否执行？(y/N): ").strip().lower()
+    except EOFError:
+        reply = ""
+
+    if reply not in ("y", "yes"):
+        return f"已取消执行：{command}"
+
+    try:
+        args = shlex.split(command)
+    except ValueError as exc:
+        return f"命令解析失败：{exc}\n原始命令：{command}"
+
+    try:
+        process = subprocess.Popen(
+            args,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = process.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return f"命令执行超时（>30s）：{command}"
+    except FileNotFoundError as exc:
+        return f"命令未找到：{exc}"
+    except Exception as exc:
+        return f"命令执行失败：{exc}"
+
+    ok = process.returncode == 0
+    parts = [
+        f"命令：{command}",
+        f"返回码：{process.returncode}（{'成功' if ok else '失败'}）",
+    ]
+    if stdout:
+        parts.append(f"stdout:\n{stdout.strip()}")
+    if stderr:
+        parts.append(f"stderr:\n{stderr.strip()}")
+    return "\n".join(parts)
 
 tools = [
     check_weather,
