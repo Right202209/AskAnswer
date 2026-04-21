@@ -176,6 +176,11 @@ def stream_query(app, query: str, thread_id: str) -> str:
                     continue
                 final_answer = _render_node_update(node, update, final_answer)
 
+        # 有些 langgraph 版本不会通过 updates 通道暴露 __interrupt__，
+        # 流结束后再从 state 探一遍挂起任务上的 interrupt，作为兜底。
+        if interrupt_payload is None:
+            interrupt_payload = _pending_interrupt(app, config)
+
         if interrupt_payload is None:
             break
 
@@ -250,6 +255,20 @@ def _extract_interrupt_value(update):
     else:
         first = update
     return getattr(first, "value", first)
+
+
+def _pending_interrupt(app, config):
+    try:
+        snapshot = app.get_state(config)
+    except Exception:
+        return None
+    tasks = getattr(snapshot, "tasks", None) or ()
+    for task in tasks:
+        interrupts = getattr(task, "interrupts", None) or ()
+        if interrupts:
+            first = interrupts[0]
+            return getattr(first, "value", first)
+    return None
 
 
 def _prompt_shell_confirmation(payload) -> dict:
