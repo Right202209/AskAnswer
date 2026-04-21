@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AskAnswer · 命令行智能助手</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <h1><span class="logo">⏺</span> AskAnswer</h1>
+      <p class="tagline">基于 LangGraph 的命令行智能助手</p>
+      <p class="subtitle">按意图分流到「读本地文件 / 联网搜索 / 直接回答」，由 LLM 调度工具并整合结果，支持自评改写与 Markdown 渲染。</p>
+      <div class="cta">
+        <a href="#install" class="btn btn-primary">快速开始</a>
+        <a href="https://github.com/Right202209/AskAnswer" class="btn btn-ghost" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section id="features">
+      <h2>核心特性</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>🧭 意图分流</h3>
+          <p>自动识别输入属于读文件 / 搜索 / 闲聊，分发到对应节点。</p>
+        </div>
+        <div class="card">
+          <h3>🔧 工具调度</h3>
+          <p>天气、时间、计算、汇率、IP 查询等内置工具，模型按需调用。</p>
+        </div>
+        <div class="card">
+          <h3>🌐 MCP 热接入</h3>
+          <p>SSE / streamable-HTTP / stdio 三种传输，运行时 <code>/mcp &lt;url&gt;</code> 即连。</p>
+        </div>
+        <div class="card">
+          <h3>🪞 自评改写</h3>
+          <p>sorcery 节点评估答案质量，搜索路径允许改写关键词重跑一次。</p>
+        </div>
+        <div class="card">
+          <h3>🖥️ 类 Claude REPL</h3>
+          <p>圆角欢迎框、箱式输入、<code>⏺ Node(detail)</code> 进度标记、Markdown 渲染。</p>
+        </div>
+        <div class="card">
+          <h3>⚡ Shell 前缀</h3>
+          <p><code>!cmd</code> 直接执行 shell 命令；命中高风险模式会二次确认。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>安装 &amp; 配置</h2>
+      <pre><code>pip install -e .</code></pre>
+      <p>在项目根目录创建 <code>.env</code>：</p>
+      <pre><code>OPENAI_API_KEY=...
+TAVILY_API_KEY=...
+OPENWEATHER_API_KEY=...   # 可选，启用天气工具</code></pre>
+    </section>
+
+    <section id="usage">
+      <h2>使用</h2>
+      <pre><code>askanswer "上海今天天气怎么样"   # 单次提问
+askanswer                         # 交互模式
+python -m askanswer               # 等价入口</code></pre>
+
+      <h3>斜线命令</h3>
+      <table>
+        <thead><tr><th>命令</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code>/help</code></td><td>显示帮助</td></tr>
+          <tr><td><code>/clear</code></td><td>清屏并开启新会话</td></tr>
+          <tr><td><code>/status</code></td><td>查看当前会话信息</td></tr>
+          <tr><td><code>/mcp</code></td><td>管理 MCP 服务</td></tr>
+          <tr><td><code>/exit</code> / <code>/quit</code> / <code>/q</code></td><td>退出（也可 Ctrl-D）</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="workflow">
+      <h2>工作流</h2>
+      <pre class="flow"><code>START → understand ─┬─ file_read ───────────┐
+                    ├─ answer (chat) ───────┤
+                    └─ search → answer ─────┤
+                         answer ⇄ tools     │
+                                            ▼
+                                         sorcery ─ {search 重搜 | END}</code></pre>
+    </section>
+
+    <section id="tools">
+      <h2>内置工具</h2>
+      <table>
+        <thead><tr><th>工具</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code>read_file</code></td><td>读取 .txt / .md / .json / .csv / .xlsx 并分析</td></tr>
+          <tr><td><code>check_weather</code></td><td>OpenWeather 实时天气</td></tr>
+          <tr><td><code>get_current_time</code></td><td>指定时区当前时间</td></tr>
+          <tr><td><code>calculate</code></td><td>安全表达式计算</td></tr>
+          <tr><td><code>convert_currency</code></td><td>货币汇率换算</td></tr>
+          <tr><td><code>lookup_ip</code></td><td>IP 地理位置与运营商查询</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>AskAnswer · MIT License</p>
+    </div>
+  </footer>
+</body>
+</html>
