@@ -17,6 +17,7 @@ from rich.padding import Padding
 
 from .graph import create_search_assistant
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
+from .tools import gen_shell_command_spec
 
 
 _console = Console()
@@ -275,23 +276,61 @@ def _prompt_shell_confirmation(payload) -> dict:
     data = payload if isinstance(payload, dict) else {}
     command = data.get("command") or str(payload)
     explanation = data.get("explanation") or ""
+    instruction = data.get("instruction") or ""
 
-    print()
-    print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}需要确认 Shell 命令{C.RESET}")
-    print(f"    {C.DIM}命令：{C.RESET}{C.CYAN}{command}{C.RESET}")
-    if explanation:
-        print(f"    {C.DIM}说明：{C.RESET}{explanation}")
-    try:
-        reply = input(f"    {C.ORANGE}是否执行？(y/N):{C.RESET} ").strip().lower()
-    except EOFError:
-        reply = ""
-    except KeyboardInterrupt:
-        reply = ""
+    while True:
         print()
-    approve = reply in ("y", "yes")
-    # 回传完整信息：批准与否 + 用户当时看到的命令，
-    # 让节点在重放时不因为 LLM 再次生成而执行到别的命令。
-    return {"approve": approve, "command": command, "explanation": explanation}
+        print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}需要确认 Shell 命令{C.RESET}")
+        print(f"    {C.DIM}命令：{C.RESET}{C.CYAN}{command}{C.RESET}")
+        if explanation:
+            print(f"    {C.DIM}说明：{C.RESET}{explanation}")
+        print(
+            f"    {C.DIM}选项：{C.RESET}"
+            f"{C.GREEN}y{C.RESET}=执行  "
+            f"{C.RED}n{C.RESET}=取消  "
+            f"{C.GOLD}e{C.RESET}=补充说明后重新生成"
+        )
+        try:
+            reply = input(f"    {C.ORANGE}你的选择 (y/N/e):{C.RESET} ").strip().lower()
+        except EOFError:
+            reply = ""
+        except KeyboardInterrupt:
+            reply = ""
+            print()
+
+        if reply in ("y", "yes"):
+            return {"approve": True, "command": command, "explanation": explanation}
+        if reply in ("e", "edit", "more", "add"):
+            more = _read_more_prompt()
+            if not more:
+                print(f"    {C.DIM}未输入补充说明，保持原命令。{C.RESET}")
+                continue
+            combined = (
+                f"{instruction}\n补充说明：{more}".strip()
+                if instruction else more
+            )
+            try:
+                new_command, new_explanation = gen_shell_command_spec(combined)
+            except Exception as exc:
+                print(f"    {C.RED}生成失败：{C.RESET}{exc}")
+                continue
+            if not new_command:
+                print(f"    {C.RED}未能生成有效命令，保持原命令。{C.RESET}")
+                continue
+            command = new_command
+            explanation = new_explanation
+            instruction = combined
+            continue
+        # 其它输入（包括 n/no/空）一律视为取消
+        return {"approve": False, "command": command, "explanation": explanation}
+
+
+def _read_more_prompt() -> str:
+    try:
+        return input(f"    {C.GOLD}补充说明:{C.RESET} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
 
 
 # ── Render ────────────────────────────────────────────────────────
