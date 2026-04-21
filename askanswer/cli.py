@@ -235,6 +235,10 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
             print(_marker("Sorcery", "通过"))
     elif node == "tools":
         print(_marker("Tools", "执行工具调用"))
+    elif node == "shell_plan":
+        plans = update.get("pending_shell") or {}
+        detail = f"生成 {len(plans)} 条命令" if plans else "规划完成"
+        print(_marker("ShellPlan", detail))
     else:
         print(_marker(node))
     return final_answer

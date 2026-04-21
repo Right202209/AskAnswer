@@ -288,6 +288,37 @@ def sorcery_answer_node(state: SearchState) -> dict:
     }
 
 
+def shell_plan_node(state: SearchState) -> dict:
+    """为本轮 tool_calls 中的 shell 调用预生成命令，写入 state。
+
+    该节点返回后 checkpointer 会持久化 ``pending_shell``，随后 ``tools_node``
+    即使因 ``interrupt()`` 被重放，也只读取 state，不再重新调用 LLM。
+    """
+    plans: dict = dict(state.get("pending_shell") or {})
+    for tc in state["messages"][-1].tool_calls:
+        if tc["name"] != SHELL_TOOL_NAME:
+            continue
+        if tc["id"] in plans:
+            continue
+        instruction = ((tc.get("args") or {}).get("instruction")
+                       or (tc.get("args") or {}).get("input")
+                       or "").strip()
+        if not instruction:
+            plans[tc["id"]] = {"command": "", "explanation": "未提供 shell 指令", "instruction": ""}
+            continue
+        try:
+            command, explanation = gen_shell_command_spec(instruction)
+        except Exception as exc:
+            plans[tc["id"]] = {"command": "", "explanation": f"生成 shell 命令失败：{exc}", "instruction": instruction}
+            continue
+        plans[tc["id"]] = {
+            "command": command,
+            "explanation": explanation,
+            "instruction": instruction,
+        }
+    return {"pending_shell": plans}
+
+
 def tools_node(state: SearchState) -> dict:
     res = []
     mcp_names = _mcp_tool_names()
@@ -295,7 +326,7 @@ def tools_node(state: SearchState) -> dict:
         name = tool_call["name"]
         args = tool_call.get("args") or {}
         if name == SHELL_TOOL_NAME:
-            observation = _run_shell_with_confirmation(args)
+            observation = _run_shell_with_confirmation(tool_call, state)
         elif name in tools_by_name:
             try:
                 observation = tools_by_name[name].invoke(args)
@@ -309,34 +340,26 @@ def tools_node(state: SearchState) -> dict:
         else:
             observation = f"未知工具：{name}"
         res.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
-    return {"messages": res}
+    return {"messages": res, "pending_shell": {}}
 
 
-def _run_shell_with_confirmation(args: dict) -> str:
-    instruction = (args.get("instruction") or args.get("input") or "").strip()
-    if not instruction:
-        return "未提供 shell 指令"
-
-    try:
-        command, explanation = gen_shell_command_spec(instruction)
-    except Exception as exc:
-        return f"生成 shell 命令失败：{exc}"
+def _run_shell_with_confirmation(tool_call: dict, state: SearchState) -> str:
+    plan = (state.get("pending_shell") or {}).get(tool_call["id"]) or {}
+    command = plan.get("command") or ""
+    explanation = plan.get("explanation") or ""
     if not command:
-        return "未能生成有效的 shell 命令"
+        return explanation or "未能生成有效的 shell 命令"
 
     danger = check_dangerous(command)
     if danger:
         return f"已拦截高风险命令（{danger}）：{command}"
 
-    # interrupt() 恢复时会重放整个 tools_node，上面的 LLM 生成会再跑一次。
-    # 为避免“批准的是 A、执行的是 B”，让 resume 值回传用户当时批准的命令，
-    # 以该命令（而非重放生成的命令）为准。
     decision = interrupt(
         {
             "type": "confirm_shell",
             "command": command,
             "explanation": explanation,
-            "instruction": instruction,
+            "instruction": plan.get("instruction", ""),
         }
     )
     approved, approved_command = _parse_decision(decision, fallback_command=command)

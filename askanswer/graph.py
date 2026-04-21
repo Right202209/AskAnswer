@@ -2,8 +2,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .nodes import (
+    SHELL_TOOL_NAME,
     file_read_node,
     generate_answer_node,
+    shell_plan_node,
     sorcery_answer_node,
     tavily_search_node,
     tools_node,
@@ -22,9 +24,12 @@ def route_from_understand(state: SearchState):
 
 
 def route_from_answer(state: SearchState):
-    if state["step"] == "tool_called":
-        return "tools"
-    return "sorcery"
+    if state["step"] != "tool_called":
+        return "sorcery"
+    tcs = getattr(state["messages"][-1], "tool_calls", None) or []
+    if any(tc.get("name") == SHELL_TOOL_NAME for tc in tcs):
+        return "shell_plan"
+    return "tools"
 
 
 def route_from_sorcery(state: SearchState):
@@ -40,6 +45,7 @@ def create_search_assistant():
     workflow.add_node("search", tavily_search_node)
     workflow.add_node("answer", generate_answer_node)
     workflow.add_node("sorcery", sorcery_answer_node)
+    workflow.add_node("shell_plan", shell_plan_node)
     workflow.add_node("tools", tools_node)
     workflow.add_node("file_read", file_read_node)
 
@@ -53,8 +59,9 @@ def create_search_assistant():
     workflow.add_conditional_edges(
         "answer",
         route_from_answer,
-        {"tools": "tools", "sorcery": "sorcery"},
+        {"shell_plan": "shell_plan", "tools": "tools", "sorcery": "sorcery"},
     )
+    workflow.add_edge("shell_plan", "tools")
     workflow.add_edge("tools", "answer")
     workflow.add_edge("file_read", "sorcery")
     workflow.add_conditional_edges(
