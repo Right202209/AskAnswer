@@ -40,6 +40,8 @@ python -m askanswer               # 等价入口
 | `/mcp` | 管理 MCP 服务（见下文） |
 | `/exit` / `/quit` / `/q` | 退出（也可 Ctrl-D） |
 
+另有快捷前缀 `!<cmd>`：直接在交互模式中执行一条 shell 命令（如 `!ls -la`、`!git status | head`），跳过 LLM 流程。命中高风险模式（`rm`、`sudo`、`dd if=` 等）时会二次确认。
+
 ### MCP 支持
 
 通过 `/mcp <url>` 即可热接入一个 MCP 服务。URL 传输自动识别：路径以 `/sse` 结尾走 SSE，其余按 streamable-HTTP 处理；也支持从代码里直接 `add_stdio(...)` 启动子进程 MCP。

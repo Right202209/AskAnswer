@@ -241,16 +241,20 @@ def gen_shell_command_spec(instruction: str) -> tuple[str, str]:
     return command, explanation
 
 
-def execute_shell_command(command: str) -> str:
-    try:
-        args = shlex.split(command)
-    except ValueError as exc:
-        return f"命令解析失败：{exc}\n原始命令：{command}"
+def execute_shell_command(command: str, shell: bool = False) -> str:
+    popen_args: str | list[str]
+    if shell:
+        popen_args = command
+    else:
+        try:
+            popen_args = shlex.split(command)
+        except ValueError as exc:
+            return f"命令解析失败：{exc}\n原始命令：{command}"
 
     try:
         process = subprocess.Popen(
-            args,
-            shell=False,
+            popen_args,
+            shell=shell,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

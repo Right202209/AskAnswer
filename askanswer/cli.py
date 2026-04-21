@@ -17,7 +17,7 @@ from rich.padding import Padding
 
 from .graph import create_search_assistant
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
-from .tools import gen_shell_command_spec
+from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 
 
 _console = Console()
@@ -108,6 +108,7 @@ def help_block() -> None:
     print(f"   {C.CYAN}/status{C.RESET}  查看当前会话信息")
     print(f"   {C.CYAN}/mcp{C.RESET}     管理 MCP 服务 ({C.DIM}/mcp 查看子命令{C.RESET})")
     print(f"   {C.CYAN}/exit{C.RESET}    退出 (也可 /quit, /q, Ctrl-D)")
+    print(f"   {C.CYAN}!<cmd>{C.RESET}   直接执行 shell 命令 (如 !ls -la)")
     print()
 
 
@@ -348,6 +349,40 @@ def render_error(message: str) -> None:
     print()
 
 
+# ── Bang shell shortcut ───────────────────────────────────────────
+
+def run_bang_command(command: str) -> None:
+    command = command.strip()
+    if not command:
+        print()
+        print(f"  {C.DIM}用法：{C.RESET}{C.CYAN}!<shell command>{C.RESET}  "
+              f"{C.DIM}例：!ls -la{C.RESET}")
+        print()
+        return
+
+    danger = check_dangerous(command)
+    if danger:
+        print()
+        print(f"  {C.RED}⚠ 高风险命令（{danger}）{C.RESET}")
+        print(f"    {C.DIM}命令：{C.RESET}{C.CYAN}{command}{C.RESET}")
+        try:
+            reply = input(f"    {C.ORANGE}仍然执行? (y/N):{C.RESET} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            reply = ""
+        if reply not in ("y", "yes"):
+            print(f"    {C.DIM}已取消。{C.RESET}")
+            print()
+            return
+
+    output = execute_shell_command(command, shell=True)
+
+    print()
+    for line in output.splitlines():
+        print(f"    {line}")
+    print()
+
+
 # ── Interactive loop ──────────────────────────────────────────────
 
 def _prompt_boxed_input() -> str:
@@ -511,6 +546,10 @@ def interactive_loop(app) -> int:
             keep_going, thread_id = handle_command(text, thread_id=thread_id)
             if not keep_going:
                 return 0
+            continue
+
+        if text.startswith("!"):
+            run_bang_command(text[1:])
             continue
 
         try:
