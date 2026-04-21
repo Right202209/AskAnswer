@@ -1,9 +1,19 @@
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langgraph.types import interrupt
 
 from .load import model, tavily_client
 from .mcp import get_manager as _mcp_manager
 from .state import SearchState
-from .tools import tools, tools_by_name
+from .tools import (
+    check_dangerous,
+    execute_shell_command,
+    gen_shell_command_spec,
+    tools,
+    tools_by_name,
+)
+
+
+SHELL_TOOL_NAME = "gen_shell_commands_run"
 
 
 _LABEL_MAP = {
@@ -284,7 +294,9 @@ def tools_node(state: SearchState) -> dict:
     for tool_call in state["messages"][-1].tool_calls:
         name = tool_call["name"]
         args = tool_call.get("args") or {}
-        if name in tools_by_name:
+        if name == SHELL_TOOL_NAME:
+            observation = _run_shell_with_confirmation(args)
+        elif name in tools_by_name:
             try:
                 observation = tools_by_name[name].invoke(args)
             except Exception as exc:
@@ -298,4 +310,60 @@ def tools_node(state: SearchState) -> dict:
             observation = f"未知工具：{name}"
         res.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
     return {"messages": res}
+
+
+def _run_shell_with_confirmation(args: dict) -> str:
+    instruction = (args.get("instruction") or args.get("input") or "").strip()
+    if not instruction:
+        return "未提供 shell 指令"
+
+    try:
+        command, explanation = gen_shell_command_spec(instruction)
+    except Exception as exc:
+        return f"生成 shell 命令失败：{exc}"
+    if not command:
+        return "未能生成有效的 shell 命令"
+
+    danger = check_dangerous(command)
+    if danger:
+        return f"已拦截高风险命令（{danger}）：{command}"
+
+    # interrupt() 恢复时会重放整个 tools_node，上面的 LLM 生成会再跑一次。
+    # 为避免“批准的是 A、执行的是 B”，让 resume 值回传用户当时批准的命令，
+    # 以该命令（而非重放生成的命令）为准。
+    decision = interrupt(
+        {
+            "type": "confirm_shell",
+            "command": command,
+            "explanation": explanation,
+            "instruction": instruction,
+        }
+    )
+    approved, approved_command = _parse_decision(decision, fallback_command=command)
+    if not approved:
+        return f"已取消执行：{approved_command}"
+    danger = check_dangerous(approved_command)
+    if danger:
+        return f"已拦截高风险命令（{danger}）：{approved_command}"
+    return execute_shell_command(approved_command)
+
+
+def _parse_decision(decision, fallback_command: str) -> tuple[bool, str]:
+    if decision is True:
+        return True, fallback_command
+    if isinstance(decision, dict):
+        approve = decision.get("approve")
+        if approve is None:
+            approve = decision.get("value")
+        cmd = decision.get("command") or fallback_command
+        if isinstance(approve, bool):
+            return approve, cmd
+        return _truthy(approve), cmd
+    return _truthy(decision), fallback_command
+
+
+def _truthy(value) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"y", "yes", "true", "1", "approve"}
 

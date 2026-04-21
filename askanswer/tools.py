@@ -213,20 +213,14 @@ def _clean_command(raw: str) -> str:
     return s.lstrip("$").strip()
 
 
-@tool
-def gen_shell_commands_run(input: str) -> str:
-    """
-    根据用户指令生成并执行 shell 命令。
-    高风险操作（rm、shutdown、重定向覆盖等）会被拦截；
-    执行前会在终端显示命令与说明，并要求用户二次确认（输入 y 才执行）。
-    """
+def gen_shell_command_spec(instruction: str) -> tuple[str, str]:
     current_os = platform.system() + " " + platform.release() + " " + platform.machine()
     prompt = (
         f"根据以下用户指令生成在 {current_os} 环境下可直接执行的单条 shell 命令。\n"
         f"严格按以下两行格式输出，不要 markdown、不要多余内容：\n"
         f"命令：<shell command>\n"
         f"说明：<一句话解释它做什么>\n\n"
-        f"用户指令：{input}"
+        f"用户指令：{instruction}"
     )
     resp = model.invoke(prompt)
     text = resp.content if hasattr(resp, "content") else str(resp)
@@ -244,25 +238,10 @@ def gen_shell_commands_run(input: str) -> str:
                 explanation = stripped[len(prefix):].strip()
                 break
     command = _clean_command(command or text)
+    return command, explanation
 
-    if not command:
-        return "未能生成有效的 shell 命令"
 
-    danger = _check_dangerous(command)
-    if danger:
-        return f"已拦截高风险命令（{danger}）：{command}"
-
-    print(f"\n建议执行的命令：{command}")
-    if explanation:
-        print(f"命令说明：{explanation}")
-    try:
-        reply = input("是否执行？(y/N): ").strip().lower()
-    except EOFError:
-        reply = ""
-
-    if reply not in ("y", "yes"):
-        return f"已取消执行：{command}"
-
+def execute_shell_command(command: str) -> str:
     try:
         args = shlex.split(command)
     except ValueError as exc:
@@ -296,6 +275,30 @@ def gen_shell_commands_run(input: str) -> str:
     if stderr:
         parts.append(f"stderr:\n{stderr.strip()}")
     return "\n".join(parts)
+
+
+check_dangerous = _check_dangerous
+
+
+@tool
+def gen_shell_commands_run(instruction: str) -> str:
+    """
+    根据用户指令生成并执行 shell 命令。
+    高风险操作（rm、shutdown、重定向覆盖等）会被自动拦截；
+    执行前会暂停图流程，向用户展示命令与说明，用户确认后才真正执行。
+    """
+    # 正常情况下，此工具的 tool_call 会被 tools_node 拦截并走人机确认流程；
+    # 这里仅作为“脱离图流程被直接调用”时的兜底，不自动执行、要求使用图入口。
+    command, explanation = gen_shell_command_spec(instruction)
+    if not command:
+        return "未能生成有效的 shell 命令"
+    danger = check_dangerous(command)
+    if danger:
+        return f"已拦截高风险命令（{danger}）：{command}"
+    return (
+        "此工具需在图流程中运行以获得用户确认。\n"
+        f"拟执行命令：{command}\n说明：{explanation or '(无)'}"
+    )
 
 tools = [
     check_weather,

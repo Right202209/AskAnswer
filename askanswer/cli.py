@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -156,54 +157,30 @@ def _truncate(s: str, limit: int = 60) -> str:
 
 def stream_query(app, query: str, thread_id: str) -> str:
     final_answer = ""
+    config = {"configurable": {"thread_id": thread_id}}
+    graph_input: object = {"messages": [HumanMessage(content=query)]}
 
     print()
-    for chunk in app.stream(
-        {"messages": [HumanMessage(content=query)]},
-        config={"configurable": {"thread_id": thread_id}},
-        stream_mode="updates",
-    ):
-        for node, update in chunk.items():
-            if not isinstance(update, dict):
-                continue
+    while True:
+        interrupt_payload = None
+        for chunk in app.stream(
+            graph_input,
+            config=config,
+            stream_mode="updates",
+        ):
+            for node, update in chunk.items():
+                if node == "__interrupt__":
+                    interrupt_payload = _extract_interrupt_value(update)
+                    continue
+                if not isinstance(update, dict):
+                    continue
+                final_answer = _render_node_update(node, update, final_answer)
 
-            if node == "understand":
-                intent = update.get("intent", "")
-                if intent == "file_read":
-                    detail = f"file_read: {_truncate(update.get('file_path', ''))}"
-                elif intent == "chat":
-                    detail = "chat"
-                else:
-                    detail = f"search: {_truncate(update.get('search_query', ''))}"
-                print(_marker("Understand", detail))
-            elif node == "file_read":
-                if update.get("final_answer"):
-                    final_answer = update["final_answer"]
-                print(_marker("FileRead", "读取完成"))
-            elif node == "search":
-                if update.get("step") == "search_failed":
-                    print(_marker("Search", "失败，回退到模型知识"))
-                else:
-                    sr = update.get("search_results", "") or ""
-                    hits = len(_HIT_RE.findall(sr))
-                    detail = f"Top {hits} 结果" if hits else "完成"
-                    print(_marker("Search", detail))
-            elif node == "answer":
-                if update.get("final_answer"):
-                    final_answer = update["final_answer"]
-                print(_marker("Answer", "整合中"))
-            elif node == "sorcery":
-                if update.get("final_answer"):
-                    final_answer = update["final_answer"]
-                if update.get("step") == "retry_search":
-                    nsq = _truncate(update.get("search_query", ""))
-                    print(_marker("Sorcery", f"不够好，重搜：{nsq}"))
-                else:
-                    print(_marker("Sorcery", "通过"))
-            elif node == "tools":
-                print(_marker("Tools", "执行工具调用"))
-            else:
-                print(_marker(node))
+        if interrupt_payload is None:
+            break
+
+        resume_value = _prompt_shell_confirmation(interrupt_payload)
+        graph_input = Command(resume=resume_value)
 
     if not final_answer:
         try:
@@ -220,6 +197,78 @@ def stream_query(app, query: str, thread_id: str) -> str:
             pass
 
     return final_answer or "未生成答案。"
+
+
+def _render_node_update(node: str, update: dict, final_answer: str) -> str:
+    if node == "understand":
+        intent = update.get("intent", "")
+        if intent == "file_read":
+            detail = f"file_read: {_truncate(update.get('file_path', ''))}"
+        elif intent == "chat":
+            detail = "chat"
+        else:
+            detail = f"search: {_truncate(update.get('search_query', ''))}"
+        print(_marker("Understand", detail))
+    elif node == "file_read":
+        if update.get("final_answer"):
+            final_answer = update["final_answer"]
+        print(_marker("FileRead", "读取完成"))
+    elif node == "search":
+        if update.get("step") == "search_failed":
+            print(_marker("Search", "失败，回退到模型知识"))
+        else:
+            sr = update.get("search_results", "") or ""
+            hits = len(_HIT_RE.findall(sr))
+            detail = f"Top {hits} 结果" if hits else "完成"
+            print(_marker("Search", detail))
+    elif node == "answer":
+        if update.get("final_answer"):
+            final_answer = update["final_answer"]
+        print(_marker("Answer", "整合中"))
+    elif node == "sorcery":
+        if update.get("final_answer"):
+            final_answer = update["final_answer"]
+        if update.get("step") == "retry_search":
+            nsq = _truncate(update.get("search_query", ""))
+            print(_marker("Sorcery", f"不够好，重搜：{nsq}"))
+        else:
+            print(_marker("Sorcery", "通过"))
+    elif node == "tools":
+        print(_marker("Tools", "执行工具调用"))
+    else:
+        print(_marker(node))
+    return final_answer
+
+
+def _extract_interrupt_value(update):
+    if isinstance(update, (list, tuple)) and update:
+        first = update[0]
+    else:
+        first = update
+    return getattr(first, "value", first)
+
+
+def _prompt_shell_confirmation(payload) -> dict:
+    data = payload if isinstance(payload, dict) else {}
+    command = data.get("command") or str(payload)
+    explanation = data.get("explanation") or ""
+
+    print()
+    print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}需要确认 Shell 命令{C.RESET}")
+    print(f"    {C.DIM}命令：{C.RESET}{C.CYAN}{command}{C.RESET}")
+    if explanation:
+        print(f"    {C.DIM}说明：{C.RESET}{explanation}")
+    try:
+        reply = input(f"    {C.ORANGE}是否执行？(y/N):{C.RESET} ").strip().lower()
+    except EOFError:
+        reply = ""
+    except KeyboardInterrupt:
+        reply = ""
+        print()
+    approve = reply in ("y", "yes")
+    # 回传完整信息：批准与否 + 用户当时看到的命令，
+    # 让节点在重放时不因为 LLM 再次生成而执行到别的命令。
+    return {"approve": approve, "command": command, "explanation": explanation}
 
 
 # ── Render ────────────────────────────────────────────────────────
