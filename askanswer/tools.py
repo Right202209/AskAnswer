@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from markitdown import MarkItDown
 from langchain_core.tools import tool
 
-from .load import openweather_api_key, model
+from AskAnswer.askanswer.load import openweather_api_key, model
 
 
 @tool
@@ -314,5 +314,6 @@ tools = [
     pwd,
     gen_shell_commands_run,
 ]
+print(tools)
 
 tools_by_name = {tool.name: tool for tool in tools}
