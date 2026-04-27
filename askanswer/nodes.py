@@ -3,6 +3,7 @@ from langgraph.types import interrupt
 
 from .load import model, tavily_client
 from .mcp import get_manager as _mcp_manager
+from .sqlagent.sql_agent import extract_sql_answer, run_sql_agent
 from .state import SearchState
 from .tools import (
     check_dangerous,
@@ -87,10 +88,11 @@ def understand_query_node(state: SearchState) -> dict:
         "请判断用户意图属于以下哪一类：\n"
         "- file_read：要求读取或分析本地文件（通常会给出路径或文件名，"
         "如 /tmp/a.txt、./data.csv、report.md）\n"
+        "- sql：要求查询数据库、编写 SQL、分析表结构、统计数据库数据\n"
         "- chat：闲聊、常识性问题，或你已知可直接回答、不需要联网\n"
         "- search：需要联网搜索获取实时、最新或不确定的信息\n\n"
         "严格按以下格式输出，没有内容的字段留空：\n"
-        "意图：file_read|chat|search\n"
+        "意图：file_read|sql|chat|search\n"
         "文件路径：（仅 file_read 时填写具体路径）\n"
         "搜索词：（仅 search 时填写最佳关键词）\n"
         "理解：（对用户需求的简要总结）\n"
@@ -99,7 +101,7 @@ def understand_query_node(state: SearchState) -> dict:
     fields = _parse_labeled(response.content)
 
     intent = (fields.get("intent") or "").lower().strip()
-    if intent not in {"file_read", "search", "chat"}:
+    if intent not in {"file_read", "sql", "search", "chat"}:
         intent = "search"
     search_query = fields.get("search_query") or user_message
     file_path = fields.get("file_path") or ""
@@ -107,6 +109,8 @@ def understand_query_node(state: SearchState) -> dict:
 
     if intent == "file_read":
         hint = f"识别为读文件：{file_path or '(未能提取路径)'}"
+    elif intent == "sql":
+        hint = "识别为数据库/SQL 问题，转交 SQL agent"
     elif intent == "chat":
         hint = "识别为闲聊/常识问题，直接回答"
     else:
@@ -141,6 +145,24 @@ def file_read_node(state: SearchState) -> dict:
         "step": "completed",
         "messages": [AIMessage(content=str(content))],
     }
+
+
+def sql_agent_node(state: SearchState) -> dict:
+    try:
+        sql_messages = run_sql_agent(list(state["messages"]))
+        final_answer = extract_sql_answer(sql_messages)
+        return {
+            "final_answer": final_answer,
+            "step": "completed",
+            "messages": sql_messages,
+        }
+    except Exception as exc:
+        message = f"SQL agent 执行失败：{exc}"
+        return {
+            "final_answer": message,
+            "step": "completed",
+            "messages": [AIMessage(content=message)],
+        }
 
 
 def tavily_search_node(state: SearchState) -> dict:

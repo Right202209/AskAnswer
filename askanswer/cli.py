@@ -211,6 +211,8 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
         intent = update.get("intent", "")
         if intent == "file_read":
             detail = f"file_read: {_truncate(update.get('file_path', ''))}"
+        elif intent == "sql":
+            detail = "sql"
         elif intent == "chat":
             detail = "chat"
         else:
@@ -228,6 +230,10 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
             hits = len(_HIT_RE.findall(sr))
             detail = f"Top {hits} 结果" if hits else "完成"
             print(_marker("Search", detail))
+    elif node == "sql":
+        if update.get("final_answer"):
+            final_answer = update["final_answer"]
+        print(_marker("SQL", "执行完成"))
     elif node == "answer":
         if update.get("final_answer"):
             final_answer = update["final_answer"]

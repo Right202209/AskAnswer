@@ -1,43 +1,45 @@
+from __future__ import annotations
 
-from langchain.messages import AIMessage
-from langchain_core.runnables import RunnableConfig
-from langgraph.graph import END, START, MessagesState, StateGraph
+from uuid import uuid4
+
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import MessagesState
 from langgraph.prebuilt import ToolNode
 
-from sql_interact import tools, engine
-from AskAnswer.askanswer.load import model
+from ..load import model
+from .sql_interact import get_sql_dialect, get_sql_tool
 
-get_schema_tool = next(tool for tool in tools if tool.name == "sql_db_schema")
+
+get_schema_tool = get_sql_tool("sql_db_schema")
 get_schema_node = ToolNode([get_schema_tool], name="get_schema")
 
-run_query_tool = next(tool for tool in tools if tool.name == "sql_db_query")
+run_query_tool = get_sql_tool("sql_db_query")
 run_query_node = ToolNode([run_query_tool], name="run_query")
 
+list_tables_tool = get_sql_tool("sql_db_list_tables")
 
-# Example: create a predetermined tool call
-def list_tables(state: MessagesState):
+
+def list_tables(state: MessagesState) -> dict:
+    tool_call_id = f"list_tables_{uuid4().hex}"
     tool_call = {
-        "name": "sql_db_list_tables",
+        "name": list_tables_tool.name,
         "args": {},
-        "id": "abc123",
+        "id": tool_call_id,
         "type": "tool_call",
     }
     tool_call_message = AIMessage(content="", tool_calls=[tool_call])
+    tool_result = list_tables_tool.invoke({})
+    response = ToolMessage(
+        content=str(tool_result),
+        tool_call_id=tool_call["id"],
+        name=list_tables_tool.name,
+    )
+    return {"messages": [tool_call_message, response]}
 
-    list_tables_tool = next(tool for tool in tools if tool.name == "sql_db_list_tables")
-    tool_message = list_tables_tool.invoke(tool_call)
-    response = AIMessage(f"Available tables: {tool_message.content}")
 
-    return {"messages": [tool_call_message, tool_message, response]}
-
-
-# Example: force a model to create a tool call
-def call_get_schema(state: MessagesState):
-    # Note that LangChain enforces that all models accept `tool_choice="any"`
-    # as well as `tool_choice=<string name of tool>`.
+def call_get_schema(state: MessagesState) -> dict:
     llm_with_tools = model.bind_tools([get_schema_tool], tool_choice="any")
     response = llm_with_tools.invoke(state["messages"])
-
     return {"messages": [response]}
 
 
@@ -54,21 +56,18 @@ only ask for the relevant columns given the question.
 
 DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
 """.format(
-    dialect=engine.dialect,
+    dialect=get_sql_dialect(),
     top_k=5,
 )
 
 
-def generate_query(state: MessagesState):
+def generate_query(state: MessagesState) -> dict:
     system_message = {
         "role": "system",
         "content": generate_query_system_prompt,
     }
-    # We do not force a tool call here, to allow the model to
-    # respond naturally when it obtains the solution.
     llm_with_tools = model.bind_tools([run_query_tool])
     response = llm_with_tools.invoke([system_message] + state["messages"])
-
     return {"messages": [response]}
 
 
@@ -88,20 +87,17 @@ If there are any of the above mistakes, rewrite the query. If there are no mista
 just reproduce the original query.
 
 You will call the appropriate tool to execute the query after running this check.
-""".format(dialect=engine.dialect)
+""".format(dialect=get_sql_dialect())
 
 
-def check_query(state: MessagesState):
+def check_query(state: MessagesState) -> dict:
     system_message = {
         "role": "system",
         "content": check_query_system_prompt,
     }
-
-    # Generate an artificial user message to check
     tool_call = state["messages"][-1].tool_calls[0]
     user_message = {"role": "user", "content": tool_call["args"]["query"]}
     llm_with_tools = model.bind_tools([run_query_tool], tool_choice="any")
     response = llm_with_tools.invoke([system_message, user_message])
     response.id = state["messages"][-1].id
-
     return {"messages": [response]}
