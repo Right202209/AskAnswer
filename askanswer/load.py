@@ -12,11 +12,10 @@ model = init_chat_model(
     temperature=0,
     max_retries=3,
     timeout=60,
+    model_provider="openai"
 )
 
-# model = OpenAI(
-# "gpt-5.4"
-# )
+
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 openweather_api_key = os.getenv("OPENWEATHER_API_KEY")
