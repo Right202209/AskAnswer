@@ -15,8 +15,10 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.padding import Padding
 
-from .graph import create_search_assistant
+from .graph import create_search_assistant, draw_search_assistant_mermaid
+from .load import model
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
+from .schema import ContextSchema
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 
 
@@ -71,6 +73,14 @@ def _pad(content: str, inner_width: int) -> str:
 
 # ── Blocks ─────────────────────────────────────────────────────────
 
+def _current_model_name() -> str:
+    for attr in ("model_name", "model"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return type(model).__name__
+
+
 def welcome_box() -> None:
     w = _term_width()
     inner = w - 4
@@ -82,6 +92,7 @@ def welcome_box() -> None:
         f"{C.CYAN}/exit{C.RESET}{C.DIM} 退出{C.RESET}",
         "",
         f"{C.DIM}cwd: {Path.cwd()}{C.RESET}",
+        f"{C.DIM}model: {_current_model_name()}{C.RESET}",
     ]
     print()
     print(f"{C.ORANGE}╭{border}╮{C.RESET}")
@@ -157,9 +168,23 @@ def _truncate(s: str, limit: int = 60) -> str:
     return out + "…"
 
 
-def stream_query(app, query: str, thread_id: str) -> str:
+def _runtime_context() -> ContextSchema:
+    return ContextSchema(
+        db_dsn=os.getenv("WLANGGRAPH_POSTGRES_DSN") or None,
+        db_dialect=os.getenv("ASKANSWER_DB_DIALECT", "postgres"),
+        tenant_id=os.getenv("ASKANSWER_TENANT_ID") or None,
+    )
+
+
+def stream_query(
+    app,
+    query: str,
+    thread_id: str,
+    runtime_context: ContextSchema | None = None,
+) -> str:
     final_answer = ""
     config = {"configurable": {"thread_id": thread_id}}
+    context = runtime_context or _runtime_context()
     graph_input: object = {"messages": [HumanMessage(content=query)]}
 
     print()
@@ -168,6 +193,7 @@ def stream_query(app, query: str, thread_id: str) -> str:
         for chunk in app.stream(
             graph_input,
             config=config,
+            context=context,
             stream_mode="updates",
         ):
             for node, update in chunk.items():
@@ -569,8 +595,38 @@ def interactive_loop(app) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AskAnswer 命令行工具")
+    parser.add_argument(
+        "--graph",
+        nargs="?",
+        const="-",
+        metavar="PATH",
+        help="生成 LangGraph Mermaid 图；不填 PATH 时输出到终端",
+    )
     parser.add_argument("question", nargs="?", help="要提问的内容")
     return parser
+
+
+def export_graph(target: str) -> int:
+    try:
+        mermaid = draw_search_assistant_mermaid()
+    except Exception as exc:
+        render_error(f"生成图失败: {exc}")
+        return 1
+
+    if target == "-":
+        print(mermaid)
+        return 0
+
+    path = Path(target)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(mermaid, encoding="utf-8")
+    except Exception as exc:
+        render_error(f"写入图文件失败: {exc}")
+        return 1
+
+    print(f"\n  {C.GREEN}✓ LangGraph 图已生成:{C.RESET} {path}\n")
+    return 0
 
 
 def main() -> int:
@@ -578,6 +634,9 @@ def main() -> int:
     args = parser.parse_args()
 
     atexit.register(_mcp_shutdown)
+
+    if args.graph is not None:
+        return export_graph(args.graph)
 
     try:
         app = create_search_assistant()

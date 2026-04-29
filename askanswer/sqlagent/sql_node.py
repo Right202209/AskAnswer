@@ -4,22 +4,48 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import MessagesState
-from langgraph.prebuilt import ToolNode
+from langgraph.runtime import Runtime
 
 from ..load import model
+from ..schema import ContextSchema, normalize_context
 from .sql_interact import get_sql_dialect, get_sql_tool
 
 
-get_schema_tool = get_sql_tool("sql_db_schema")
-get_schema_node = ToolNode([get_schema_tool], name="get_schema")
-
-run_query_tool = get_sql_tool("sql_db_query")
-run_query_node = ToolNode([run_query_tool], name="run_query")
-
-list_tables_tool = get_sql_tool("sql_db_list_tables")
+def _runtime_context(runtime: Runtime[ContextSchema]) -> ContextSchema:
+    return normalize_context(getattr(runtime, "context", None))
 
 
-def list_tables(state: MessagesState) -> dict:
+def _tool(name: str, runtime: Runtime[ContextSchema]):
+    return get_sql_tool(name, _runtime_context(runtime))
+
+
+def _run_last_tool_calls(state: MessagesState, tool) -> dict:
+    responses = []
+    for tool_call in getattr(state["messages"][-1], "tool_calls", None) or []:
+        if tool_call["name"] != tool.name:
+            result = f"SQL 工具名不匹配：期望 {tool.name}，收到 {tool_call['name']}"
+        else:
+            result = tool.invoke(tool_call.get("args") or {})
+        responses.append(
+            ToolMessage(
+                content=str(result),
+                tool_call_id=tool_call["id"],
+                name=tool.name,
+            )
+        )
+    return {"messages": responses}
+
+
+def get_schema_node(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
+    return _run_last_tool_calls(state, _tool("sql_db_schema", runtime))
+
+
+def run_query_node(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
+    return _run_last_tool_calls(state, _tool("sql_db_query", runtime))
+
+
+def list_tables(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
+    list_tables_tool = _tool("sql_db_list_tables", runtime)
     tool_call_id = f"list_tables_{uuid4().hex}"
     tool_call = {
         "name": list_tables_tool.name,
@@ -37,7 +63,8 @@ def list_tables(state: MessagesState) -> dict:
     return {"messages": [tool_call_message, response]}
 
 
-def call_get_schema(state: MessagesState) -> dict:
+def call_get_schema(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
+    get_schema_tool = _tool("sql_db_schema", runtime)
     llm_with_tools = model.bind_tools([get_schema_tool], tool_choice="any")
     response = llm_with_tools.invoke(state["messages"])
     return {"messages": [response]}
@@ -55,17 +82,18 @@ examples in the database. Never query for all the columns from a specific table,
 only ask for the relevant columns given the question.
 
 DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
-""".format(
-    dialect=get_sql_dialect(),
-    top_k=5,
-)
+"""
 
 
-def generate_query(state: MessagesState) -> dict:
+def generate_query(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
     system_message = {
         "role": "system",
-        "content": generate_query_system_prompt,
+        "content": generate_query_system_prompt.format(
+            dialect=get_sql_dialect(_runtime_context(runtime)),
+            top_k=5,
+        ),
     }
+    run_query_tool = _tool("sql_db_query", runtime)
     llm_with_tools = model.bind_tools([run_query_tool])
     response = llm_with_tools.invoke([system_message] + state["messages"])
     return {"messages": [response]}
@@ -87,16 +115,19 @@ If there are any of the above mistakes, rewrite the query. If there are no mista
 just reproduce the original query.
 
 You will call the appropriate tool to execute the query after running this check.
-""".format(dialect=get_sql_dialect())
+"""
 
 
-def check_query(state: MessagesState) -> dict:
+def check_query(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
     system_message = {
         "role": "system",
-        "content": check_query_system_prompt,
+        "content": check_query_system_prompt.format(
+            dialect=get_sql_dialect(_runtime_context(runtime)),
+        ),
     }
     tool_call = state["messages"][-1].tool_calls[0]
     user_message = {"role": "user", "content": tool_call["args"]["query"]}
+    run_query_tool = _tool("sql_db_query", runtime)
     llm_with_tools = model.bind_tools([run_query_tool], tool_choice="any")
     response = llm_with_tools.invoke([system_message, user_message])
     response.id = state["messages"][-1].id

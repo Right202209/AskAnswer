@@ -12,6 +12,7 @@ from .nodes import (
     tools_node,
     understand_query_node,
 )
+from .schema import ContextSchema
 from .state import SearchState
 
 
@@ -42,7 +43,7 @@ def route_from_sorcery(state: SearchState):
 
 
 def create_search_assistant():
-    workflow = StateGraph(SearchState)
+    workflow = StateGraph(SearchState,context_schema=ContextSchema)
 
     workflow.add_node("understand", understand_query_node)
     workflow.add_node("search", tavily_search_node)
@@ -78,3 +79,8 @@ def create_search_assistant():
     memory = InMemorySaver()
     app = workflow.compile(checkpointer=memory)
     return app
+
+
+def draw_search_assistant_mermaid() -> str:
+    app = create_search_assistant()
+    return app.get_graph().draw_mermaid()

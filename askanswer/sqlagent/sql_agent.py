@@ -5,6 +5,7 @@ from typing import Literal
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
+from ..schema import ContextSchema, normalize_context
 from .sql_node import (
     call_get_schema,
     check_query,
@@ -28,7 +29,7 @@ def should_continue(state: SqlAgentState) -> Literal[END, "check_query"]:
 
 
 def build_sql_agent():
-    builder = StateGraph(SqlAgentState)
+    builder = StateGraph(SqlAgentState, context_schema=ContextSchema)
     builder.add_node("list_tables", list_tables)
     builder.add_node("call_get_schema", call_get_schema)
     builder.add_node("get_schema", get_schema_node)
@@ -50,8 +51,11 @@ def build_sql_agent():
 sql_agent = build_sql_agent()
 
 
-def run_sql_agent(messages: list) -> list:
-    result = sql_agent.invoke({"messages": messages})
+def run_sql_agent(messages: list, context: ContextSchema | dict | None = None) -> list:
+    result = sql_agent.invoke(
+        {"messages": messages},
+        context=normalize_context(context),
+    )
     return result["messages"]
 
 

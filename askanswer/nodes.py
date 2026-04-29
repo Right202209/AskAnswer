@@ -1,8 +1,10 @@
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from .load import model, tavily_client
 from .mcp import get_manager as _mcp_manager
+from .schema import ContextSchema, normalize_context
 from .sqlagent.sql_agent import extract_sql_answer, run_sql_agent
 from .state import SearchState
 from .tools import (
@@ -147,9 +149,12 @@ def file_read_node(state: SearchState) -> dict:
     }
 
 
-def sql_agent_node(state: SearchState) -> dict:
+def sql_agent_node(state: SearchState, runtime: Runtime[ContextSchema]) -> dict:
     try:
-        sql_messages = run_sql_agent(list(state["messages"]))
+        sql_messages = run_sql_agent(
+            list(state["messages"]),
+            context=normalize_context(getattr(runtime, "context", None)),
+        )
         final_answer = extract_sql_answer(sql_messages)
         return {
             "final_answer": final_answer,

@@ -16,7 +16,24 @@ pip install -e .
 OPENAI_API_KEY=...
 TAVILY_API_KEY=...
 OPENWEATHER_API_KEY=...   # 可选，启用天气工具
+WLANGGRAPH_POSTGRES_DSN=postgresql://user:password@localhost:5432/dbname  # 可选，SQL agent 默认数据库
+ASKANSWER_DB_DIALECT=postgres  # 可选，SQL agent 方言提示
 ```
+
+SQL agent 实际从 LangGraph runtime context 读取数据库配置：
+
+```python
+from askanswer.graph import create_search_assistant
+from askanswer.schema import ContextSchema
+
+app = create_search_assistant()
+app.invoke(
+    {"messages": [{"role": "user", "content": "统计一下订单数量"}]},
+    context=ContextSchema(db_dsn="postgresql://user:password@localhost:5432/dbname"),
+)
+```
+
+CLI 会把 `.env` 中的 `WLANGGRAPH_POSTGRES_DSN` / `ASKANSWER_DB_DIALECT` 注入 runtime context。
 
 ## 使用
 
@@ -24,6 +41,8 @@ OPENWEATHER_API_KEY=...   # 可选，启用天气工具
 askanswer "上海今天天气怎么样"   # 单次提问
 askanswer                         # 交互模式
 python -m askanswer               # 等价入口
+askanswer --graph                 # 输出 LangGraph Mermaid 图
+askanswer --graph docs/graph.mmd  # 写入 Mermaid 图文件
 ```
 
 ### 交互模式界面
@@ -74,6 +93,7 @@ askanswer/
 
 ```
 START → understand ─┬─ file_read ───────────┐
+                    ├─ sql ──────────────── END
                     ├─ answer (chat) ───────┤
                     └─ search → answer ─────┤
                          answer ⇄ tools     │
@@ -81,8 +101,9 @@ START → understand ─┬─ file_read ───────────┐
                                          sorcery ─ {search 重搜 | END}
 ```
 
-- `understand`：分类用户意图为 `file_read` / `chat` / `search`，并提取文件路径或搜索关键词
+- `understand`：分类用户意图为 `file_read` / `sql` / `chat` / `search`，并提取文件路径或搜索关键词
 - `file_read`：直接调用 `read_file` 工具读取并分析本地文件
+- `sql`：从 runtime context 读取数据库配置，调用 SQL agent 查询数据库
 - `search`：Tavily 检索 Top 5
 - `answer`：模型已绑定工具，可按需调用；整合搜索 / 工具结果给出回答
 - `tools`：执行模型发起的工具调用，结果回写后重入 `answer`
