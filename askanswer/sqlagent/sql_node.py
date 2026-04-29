@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import MessagesState
 from langgraph.runtime import Runtime
 
@@ -11,12 +11,92 @@ from ..schema import ContextSchema, normalize_context
 from .sql_interact import get_sql_dialect, get_sql_tool
 
 
+MAX_TABLE_LIST_CHARS = 4000
+MAX_SCHEMA_CHARS = 12000
+MAX_QUERY_RESULT_CHARS = 8000
+
+
 def _runtime_context(runtime: Runtime[ContextSchema]) -> ContextSchema:
     return normalize_context(getattr(runtime, "context", None))
 
 
 def _tool(name: str, runtime: Runtime[ContextSchema]):
     return get_sql_tool(name, _runtime_context(runtime))
+
+
+def _trim_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return f"{text[:limit]}\n\n[内容过长，已截断 {omitted} 个字符]"
+
+
+def _trim_observation(tool_name: str, content: object) -> str:
+    text = str(content)
+    limits = {
+        "sql_db_list_tables": MAX_TABLE_LIST_CHARS,
+        "sql_db_schema": MAX_SCHEMA_CHARS,
+        "sql_db_query": MAX_QUERY_RESULT_CHARS,
+    }
+    return _trim_text(text, limits.get(tool_name, MAX_QUERY_RESULT_CHARS))
+
+
+def _user_question(state: MessagesState) -> str:
+    for message in state["messages"]:
+        if isinstance(message, HumanMessage):
+            return str(message.content)
+    return str(getattr(state["messages"][0], "content", "")) if state["messages"] else ""
+
+
+def _latest_tool_content(state: MessagesState, tool_name: str) -> str:
+    for message in reversed(state["messages"]):
+        if isinstance(message, ToolMessage) and getattr(message, "name", "") == tool_name:
+            return str(message.content)
+    return ""
+
+
+def _latest_sql_query(state: MessagesState) -> str:
+    for message in reversed(state["messages"]):
+        for tool_call in reversed(getattr(message, "tool_calls", None) or []):
+            if tool_call.get("name") == "sql_db_query":
+                args = tool_call.get("args") or {}
+                return str(args.get("query") or "")
+    return ""
+
+
+def _schema_selection_messages(state: MessagesState) -> list:
+    tables = _latest_tool_content(state, "sql_db_list_tables") or "未获取到表列表。"
+    return [
+        SystemMessage(
+            content=(
+                "根据用户问题和可用表，选择回答问题所需的最少表，"
+                "并调用 sql_db_schema 获取这些表结构。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"用户问题：{_user_question(state)}\n\n"
+                f"可用表：\n{_trim_text(tables, MAX_TABLE_LIST_CHARS)}"
+            )
+        ),
+    ]
+
+
+def _query_generation_messages(state: MessagesState, system_message: SystemMessage) -> list:
+    schema = _latest_tool_content(state, "sql_db_schema") or "未获取到表结构。"
+    previous_query = _latest_sql_query(state)
+    previous_result = _latest_tool_content(state, "sql_db_query")
+
+    parts = [
+        f"用户问题：{_user_question(state)}",
+        f"数据库表结构：\n{_trim_text(schema, MAX_SCHEMA_CHARS)}",
+    ]
+    if previous_query:
+        parts.append(f"上一条 SQL：\n{previous_query}")
+    if previous_result:
+        parts.append(f"上一条 SQL 的结果或错误：\n{_trim_text(previous_result, MAX_QUERY_RESULT_CHARS)}")
+
+    return [system_message, HumanMessage(content="\n\n".join(parts))]
 
 
 def _run_last_tool_calls(state: MessagesState, tool) -> dict:
@@ -28,7 +108,7 @@ def _run_last_tool_calls(state: MessagesState, tool) -> dict:
             result = tool.invoke(tool_call.get("args") or {})
         responses.append(
             ToolMessage(
-                content=str(result),
+                content=_trim_observation(tool.name, result),
                 tool_call_id=tool_call["id"],
                 name=tool.name,
             )
@@ -41,7 +121,10 @@ def get_schema_node(state: MessagesState, runtime: Runtime[ContextSchema]) -> di
 
 
 def run_query_node(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
-    return _run_last_tool_calls(state, _tool("sql_db_query", runtime))
+    result = _run_last_tool_calls(state, _tool("sql_db_query", runtime))
+    if result["messages"]:
+        result["query_count"] = state.get("query_count", 0) + len(result["messages"])
+    return result
 
 
 def list_tables(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
@@ -56,7 +139,7 @@ def list_tables(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
     tool_call_message = AIMessage(content="", tool_calls=[tool_call])
     tool_result = list_tables_tool.invoke({})
     response = ToolMessage(
-        content=str(tool_result),
+        content=_trim_observation(list_tables_tool.name, tool_result),
         tool_call_id=tool_call["id"],
         name=list_tables_tool.name,
     )
@@ -66,7 +149,7 @@ def list_tables(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
 def call_get_schema(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
     get_schema_tool = _tool("sql_db_schema", runtime)
     llm_with_tools = model.bind_tools([get_schema_tool], tool_choice="any")
-    response = llm_with_tools.invoke(state["messages"])
+    response = llm_with_tools.invoke(_schema_selection_messages(state))
     return {"messages": [response]}
 
 
@@ -86,16 +169,15 @@ DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the databa
 
 
 def generate_query(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
-    system_message = {
-        "role": "system",
-        "content": generate_query_system_prompt.format(
+    system_message = SystemMessage(
+        content=generate_query_system_prompt.format(
             dialect=get_sql_dialect(_runtime_context(runtime)),
             top_k=5,
         ),
-    }
+    )
     run_query_tool = _tool("sql_db_query", runtime)
     llm_with_tools = model.bind_tools([run_query_tool])
-    response = llm_with_tools.invoke([system_message] + state["messages"])
+    response = llm_with_tools.invoke(_query_generation_messages(state, system_message))
     return {"messages": [response]}
 
 

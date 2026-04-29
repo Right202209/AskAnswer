@@ -8,7 +8,7 @@ from .state import SearchState
 class ContextSchema:
     llm_provider: str = "openai"
     db_dsn: str | None = None
-    db_dialect: str = "postgres"
+    db_dialect: str | None = None
     tenant_id: str | None = None
 
 

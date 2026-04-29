@@ -171,7 +171,7 @@ def _truncate(s: str, limit: int = 60) -> str:
 def _runtime_context() -> ContextSchema:
     return ContextSchema(
         db_dsn=os.getenv("WLANGGRAPH_POSTGRES_DSN") or None,
-        db_dialect=os.getenv("ASKANSWER_DB_DIALECT", "postgres"),
+        db_dialect=os.getenv("ASKANSWER_DB_DIALECT") or None,
         tenant_id=os.getenv("ASKANSWER_TENANT_ID") or None,
     )
 

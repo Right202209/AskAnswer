@@ -10,6 +10,8 @@ load_dotenv(override=True)
 model = init_chat_model(
     "gpt-5.4",
     temperature=0,
+    max_retries=3,
+    timeout=60,
 )
 
 # model = OpenAI(

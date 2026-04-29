@@ -17,7 +17,7 @@ OPENAI_API_KEY=...
 TAVILY_API_KEY=...
 OPENWEATHER_API_KEY=...   # 可选，启用天气工具
 WLANGGRAPH_POSTGRES_DSN=postgresql://user:password@localhost:5432/dbname  # 可选，SQL agent 默认数据库
-ASKANSWER_DB_DIALECT=postgres  # 可选，SQL agent 方言提示
+ASKANSWER_DB_DIALECT=  # 可选；留空时从数据库连接自动推断方言
 ```
 
 SQL agent 实际从 LangGraph runtime context 读取数据库配置：
