@@ -16,7 +16,7 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 
 from .graph import create_search_assistant, draw_search_assistant_mermaid
-from .load import model
+from .load import current_model_label, model, set_model
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
 from .schema import ContextSchema
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
@@ -74,6 +74,9 @@ def _pad(content: str, inner_width: int) -> str:
 # ── Blocks ─────────────────────────────────────────────────────────
 
 def _current_model_name() -> str:
+    label = current_model_label()
+    if label:
+        return label
     for attr in ("model_name", "model"):
         value = getattr(model, attr, None)
         if isinstance(value, str) and value:
@@ -117,6 +120,7 @@ def help_block() -> None:
     print(f"   {C.CYAN}/help{C.RESET}    显示此帮助")
     print(f"   {C.CYAN}/clear{C.RESET}   清屏并开始新会话")
     print(f"   {C.CYAN}/status{C.RESET}  查看当前会话信息")
+    print(f"   {C.CYAN}/model{C.RESET}   查看或切换模型 ({C.DIM}/model <provider:name>{C.RESET})")
     print(f"   {C.CYAN}/mcp{C.RESET}     管理 MCP 服务 ({C.DIM}/mcp 查看子命令{C.RESET})")
     print(f"   {C.CYAN}/exit{C.RESET}    退出 (也可 /quit, /q, Ctrl-D)")
     print(f"   {C.CYAN}!<cmd>{C.RESET}   直接执行 shell 命令 (如 !ls -la)")
@@ -138,6 +142,7 @@ def status_block(thread_id: str) -> None:
     print(f" {C.BOLD}Status{C.RESET}")
     print(f"   {C.DIM}thread:{C.RESET}  {thread_id}")
     print(f"   {C.DIM}cwd:{C.RESET}     {Path.cwd()}")
+    print(f"   {C.DIM}model:{C.RESET}   {current_model_label()}")
     servers = _mcp_manager().list_servers()
     if servers:
         summary = ", ".join(f"{s['name']}({s['tools']})" for s in servers)
@@ -448,6 +453,8 @@ def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
         print(f"\n  {C.DIM}已开始新会话：{thread_id[:8]}…{C.RESET}\n")
     elif head_lc == "/status":
         status_block(thread_id)
+    elif head_lc == "/model":
+        handle_model_command(tail)
     elif head_lc == "/mcp":
         handle_mcp_command(tail)
     else:
@@ -456,6 +463,27 @@ def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
             f"({C.CYAN}/help{C.RESET} 查看可用命令)\n"
         )
     return True, thread_id
+
+
+def handle_model_command(args: str) -> None:
+    if not args:
+        print()
+        print(f"  {C.BOLD}Model{C.RESET}")
+        print(f"   {C.DIM}current:{C.RESET} {current_model_label()}")
+        print(f"   {C.DIM}usage:{C.RESET}   {C.CYAN}/model <name>{C.RESET} "
+              f"{C.DIM}或{C.RESET} {C.CYAN}/model <provider:name>{C.RESET}")
+        print()
+        return
+
+    try:
+        label = set_model(args)
+    except Exception as exc:
+        render_error(f"模型切换失败: {exc}")
+        return
+
+    print()
+    print(f"  {C.GREEN}✓ 已切换模型:{C.RESET} {C.BOLD}{label}{C.RESET}")
+    print()
 
 
 def handle_mcp_command(args: str) -> None:
