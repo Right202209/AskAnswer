@@ -2,16 +2,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .nodes import (
-    SHELL_TOOL_NAME,
     file_read_node,
-    generate_answer_node,
-    shell_plan_node,
     sorcery_answer_node,
     sql_agent_node,
     tavily_search_node,
-    tools_node,
     understand_query_node,
 )
+from .react import build_react_subgraph
 from .schema import ContextSchema
 from .state import SearchState
 
@@ -27,15 +24,6 @@ def route_from_understand(state: SearchState):
     return "search"
 
 
-def route_from_answer(state: SearchState):
-    if state["step"] != "tool_called":
-        return "sorcery"
-    tcs = getattr(state["messages"][-1], "tool_calls", None) or []
-    if any(tc.get("name") == SHELL_TOOL_NAME for tc in tcs):
-        return "shell_plan"
-    return "tools"
-
-
 def route_from_sorcery(state: SearchState):
     if state["step"] == "retry_search":
         return "search"
@@ -43,14 +31,13 @@ def route_from_sorcery(state: SearchState):
 
 
 def create_search_assistant():
-    workflow = StateGraph(SearchState,context_schema=ContextSchema)
+    workflow = StateGraph(SearchState, context_schema=ContextSchema)
+    react = build_react_subgraph()
 
     workflow.add_node("understand", understand_query_node)
     workflow.add_node("search", tavily_search_node)
-    workflow.add_node("answer", generate_answer_node)
+    workflow.add_node("answer", react)
     workflow.add_node("sorcery", sorcery_answer_node)
-    workflow.add_node("shell_plan", shell_plan_node)
-    workflow.add_node("tools", tools_node)
     workflow.add_node("file_read", file_read_node)
     workflow.add_node("sql", sql_agent_node)
 
@@ -62,13 +49,7 @@ def create_search_assistant():
     )
     workflow.add_edge("search", "answer")
     workflow.add_edge("sql", END)
-    workflow.add_conditional_edges(
-        "answer",
-        route_from_answer,
-        {"shell_plan": "shell_plan", "tools": "tools", "sorcery": "sorcery"},
-    )
-    workflow.add_edge("shell_plan", "tools")
-    workflow.add_edge("tools", "answer")
+    workflow.add_edge("answer", "sorcery")
     workflow.add_edge("file_read", "sorcery")
     workflow.add_conditional_edges(
         "sorcery",

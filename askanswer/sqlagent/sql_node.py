@@ -102,15 +102,18 @@ def _query_generation_messages(state: MessagesState, system_message: SystemMessa
 def _run_last_tool_calls(state: MessagesState, tool) -> dict:
     responses = []
     for tool_call in getattr(state["messages"][-1], "tool_calls", None) or []:
-        if tool_call["name"] != tool.name:
-            result = f"SQL 工具名不匹配：期望 {tool.name}，收到 {tool_call['name']}"
+        requested_name = tool_call["name"]
+        if requested_name != tool.name:
+            result = f"SQL 工具名不匹配：期望 {tool.name}，收到 {requested_name}"
+            response_name = requested_name
         else:
             result = tool.invoke(tool_call.get("args") or {})
+            response_name = tool.name
         responses.append(
             ToolMessage(
-                content=_trim_observation(tool.name, result),
+                content=_trim_observation(response_name, result),
                 tool_call_id=tool_call["id"],
-                name=tool.name,
+                name=response_name,
             )
         )
     return {"messages": responses}

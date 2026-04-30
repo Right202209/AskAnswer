@@ -1,7 +1,4 @@
 from dataclasses import dataclass, fields
-from langgraph.graph import StateGraph
-
-from .state import SearchState
 
 
 @dataclass
@@ -20,5 +17,3 @@ def normalize_context(context: ContextSchema | dict | None) -> ContextSchema:
         values = {key: value for key, value in context.items() if key in valid_fields}
         return ContextSchema(**values)
     return ContextSchema()
-
-graph = StateGraph(SearchState, context_schema=ContextSchema)
