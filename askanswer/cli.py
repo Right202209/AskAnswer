@@ -18,6 +18,7 @@ from rich.padding import Padding
 from .graph import create_search_assistant, draw_search_assistant_mermaid
 from .load import current_model_label, model, set_model
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
+from .registry import get_registry
 from .schema import ContextSchema
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 
@@ -261,10 +262,6 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
             hits = len(_HIT_RE.findall(sr))
             detail = f"Top {hits} 结果" if hits else "完成"
             print(_marker("Search", detail))
-    elif node == "sql":
-        if update.get("final_answer"):
-            final_answer = update["final_answer"]
-        print(_marker("SQL", "执行完成"))
     elif node == "answer":
         if update.get("final_answer"):
             final_answer = update["final_answer"]
@@ -523,6 +520,7 @@ def _add_mcp_url(url: str, name: str | None) -> None:
     except Exception as exc:
         render_error(f"MCP 连接失败: {exc}")
         return
+    get_registry().refresh_mcp()
     tools = _mcp_manager().list_tools(server=registered)
     print()
     print(
@@ -541,6 +539,8 @@ def _add_mcp_url(url: str, name: str | None) -> None:
 
 def _remove_mcp_server(name: str) -> None:
     ok = _mcp_manager().remove(name)
+    if ok:
+        get_registry().refresh_mcp()
     print()
     if ok:
         print(f"  {C.GREEN}✓ 已断开 MCP:{C.RESET} {name}")
@@ -667,6 +667,7 @@ def main() -> int:
         return export_graph(args.graph)
 
     try:
+        get_registry()  # seed built-in + sql + (any pre-existing MCP) before first query
         app = create_search_assistant()
     except Exception as exc:
         render_error(f"初始化失败: {exc}")

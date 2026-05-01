@@ -4,7 +4,6 @@ from langgraph.graph import END, START, StateGraph
 from .nodes import (
     file_read_node,
     sorcery_answer_node,
-    sql_agent_node,
     tavily_search_node,
     understand_query_node,
 )
@@ -17,9 +16,9 @@ def route_from_understand(state: SearchState):
     intent = state.get("intent", "search")
     if intent == "file_read":
         return "file_read"
-    if intent == "sql":
-        return "sql"
-    if intent == "chat":
+    # ``sql`` and ``chat`` both flow into the react subgraph; the registry
+    # bundle for the active intent decides which tools the model can call.
+    if intent in ("chat", "sql"):
         return "answer"
     return "search"
 
@@ -39,16 +38,14 @@ def create_search_assistant():
     workflow.add_node("answer", react)
     workflow.add_node("sorcery", sorcery_answer_node)
     workflow.add_node("file_read", file_read_node)
-    workflow.add_node("sql", sql_agent_node)
 
     workflow.add_edge(START, "understand")
     workflow.add_conditional_edges(
         "understand",
         route_from_understand,
-        {"file_read": "file_read", "sql": "sql", "search": "search", "answer": "answer"},
+        {"file_read": "file_read", "search": "search", "answer": "answer"},
     )
     workflow.add_edge("search", "answer")
-    workflow.add_edge("sql", END)
     workflow.add_edge("answer", "sorcery")
     workflow.add_edge("file_read", "sorcery")
     workflow.add_conditional_edges(

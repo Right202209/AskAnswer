@@ -2,11 +2,8 @@ import json
 import re
 
 from langchain_core.messages import AIMessage, SystemMessage
-from langgraph.runtime import Runtime
 
 from .load import model, tavily_client
-from .schema import ContextSchema, normalize_context
-from .sqlagent.sql_agent import extract_sql_answer, run_sql_agent
 from .state import SearchState
 from .tools import tools_by_name
 
@@ -285,7 +282,7 @@ def understand_query_node(state: SearchState) -> dict:
     if intent == "file_read":
         hint = f"识别为读文件：{file_path or '(未能提取路径)'}"
     elif intent == "sql":
-        hint = "识别为数据库/SQL 问题，转交 SQL agent"
+        hint = "识别为数据库/SQL 问题，转交 sql_query 工具"
     elif intent == "chat":
         hint = "识别为闲聊/常识问题，直接回答"
     else:
@@ -320,27 +317,6 @@ def file_read_node(state: SearchState) -> dict:
         "step": "completed",
         "messages": [AIMessage(content=str(content))],
     }
-
-
-def sql_agent_node(state: SearchState, runtime: Runtime[ContextSchema]) -> dict:
-    try:
-        sql_messages = run_sql_agent(
-            list(state["messages"]),
-            context=normalize_context(getattr(runtime, "context", None)),
-        )
-        final_answer = extract_sql_answer(sql_messages)
-        return {
-            "final_answer": final_answer,
-            "step": "completed",
-            "messages": sql_messages,
-        }
-    except Exception as exc:
-        message = f"SQL agent 执行失败：{exc}"
-        return {
-            "final_answer": message,
-            "step": "completed",
-            "messages": [AIMessage(content=message)],
-        }
 
 
 def tavily_search_node(state: SearchState) -> dict:

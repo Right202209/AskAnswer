@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "AskAnswer 命令行搜索助手"
 requires-python = ">=3.10"
 dependencies = [
-    "langchain",
-    "langchain-core",
-    "langgraph",
+    "langchain>=1.0",
+    "langchain-core>=0.3.0",
+    "langgraph>=1.1.5",
     "mcp",
     "tavily-python",
     "python-dotenv",
@@ -21,5 +21,5 @@ dependencies = [
 [project.scripts]
 askanswer = "askanswer.cli:main"
 
-[tool.setuptools]
-packages = ["askanswer"]
+[tool.setuptools.packages.find]
+include = ["askanswer*"]
