@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from markitdown import MarkItDown
 from langchain_core.tools import tool
 
-from .load import openweather_api_key, model
+from .load import openweather_api_key, model, tavily_client
 
 
 @tool
@@ -164,6 +164,42 @@ def markitdown(file_path: str) -> str:
 
 
 @tool
+def tavily_search(query: str) -> str:
+    """联网搜索实时或最新信息。参数 query 为搜索关键词，返回 Top 5 网页摘要与 Tavily 综合回答。"""
+
+    try:
+        response = tavily_client.search(
+            query=query, search_depth="basic", max_results=5, include_answer=True
+        )
+    except Exception as exc:
+        return f"搜索失败：{exc}"
+
+    results = response.get("results", [])
+    tavily_answer = (response.get("answer") or "").strip()
+
+    out = f"查询关键词：{query}\n\n"
+    if tavily_answer:
+        out += f"Tavily 摘要：{tavily_answer}\n\n"
+    out += "搜索结果（Top 5）：\n\n"
+
+    if not results:
+        out += "未找到任何搜索结果。\n"
+        return out.strip()
+
+    for i, result in enumerate(results, 1):
+        title = result.get("title", "无标题")
+        url = result.get("url", "#")
+        content = result.get("content", "无内容摘要")
+        score = result.get("score", 0.0)
+        out += (
+            f"{i}. **{title}** (相关度: {score:.3f})\n"
+            f"   链接: {url}\n"
+            f"   {content[:280]}{'...' if len(content) > 280 else ''}\n\n"
+        )
+    return out.strip()
+
+
+@tool
 def pwd()->str:
     """
     获取当前工作目录的路径
@@ -311,6 +347,7 @@ tools = [
     convert_currency,
     lookup_ip,
     read_file,
+    tavily_search,
     pwd,
     gen_shell_commands_run,
 ]

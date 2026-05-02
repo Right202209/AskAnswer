@@ -30,9 +30,10 @@ BUNDLE_FILE = "file_read"
 BUNDLE_SQL = "sql"
 ALL_BUNDLES = frozenset({BUNDLE_CHAT, BUNDLE_SEARCH, BUNDLE_FILE, BUNDLE_SQL})
 
-# Default bundles for built-in helpers (small, generic — fine almost anywhere
-# except SQL, which should stay focused).
-_BUILTIN_BUNDLES = frozenset({BUNDLE_CHAT, BUNDLE_SEARCH, BUNDLE_FILE})
+# Built-in helpers are reachable from every intent so the react loop can
+# freely chain file_read / search / chat / sql tools (e.g. SQL mode reading
+# a CSV, chat mode searching the web).
+_BUILTIN_BUNDLES = ALL_BUNDLES
 _SHELL_BUNDLES = frozenset({BUNDLE_CHAT, BUNDLE_SEARCH, BUNDLE_FILE})
 # MCP tools come from user-installed servers; expose to all bundles so the
 # model can reach them regardless of intent.
@@ -133,6 +134,7 @@ def _seed_builtin(registry: ToolRegistry) -> None:
         lookup_ip,
         pwd,
         read_file,
+        tavily_search,
     )
 
     plain_tools = (
@@ -143,6 +145,7 @@ def _seed_builtin(registry: ToolRegistry) -> None:
         lookup_ip,
         pwd,
         read_file,
+        tavily_search,
     )
     for tool in plain_tools:
         registry.register(

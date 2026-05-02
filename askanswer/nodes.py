@@ -1,11 +1,10 @@
 import json
 import re
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from .load import model, tavily_client
+from .load import model
 from .state import SearchState
-from .tools import tools_by_name
 
 
 _INTENTS = {"file_read", "sql", "search", "chat"}
@@ -299,74 +298,11 @@ def understand_query_node(state: SearchState) -> dict:
     }
 
 
-def file_read_node(state: SearchState) -> dict:
-    path = (state.get("file_path") or "").strip()
-    if not path:
-        msg = "未能识别要读取的文件路径，请明确指出文件路径后重试。"
-        return {
-            "final_answer": msg,
-            "step": "completed",
-            "messages": [AIMessage(content=msg)],
-        }
-    try:
-        content = tools_by_name["read_file"].invoke({"path": path})
-    except Exception as exc:
-        content = f"读取 `{path}` 失败：{exc}"
-    return {
-        "final_answer": str(content),
-        "step": "completed",
-        "messages": [AIMessage(content=str(content))],
-    }
-
-
-def tavily_search_node(state: SearchState) -> dict:
-    search_query = state["search_query"]
-    try:
-        response = tavily_client.search(
-            query=search_query, search_depth="basic", max_results=5, include_answer=True
-        )
-
-        results = response.get("results", [])
-        tavily_answer = (response.get("answer") or "").strip()
-
-        search_results = f"查询关键词：{search_query}\n\n"
-        if tavily_answer:
-            search_results += f"Tavily 摘要：{tavily_answer}\n\n"
-        search_results += "搜索结果（Top 5）：\n\n"
-
-        if results:
-            for i, result in enumerate(results, 1):
-                title = result.get("title", "无标题")
-                url = result.get("url", "#")
-                content = result.get("content", "无内容摘要")
-                score = result.get("score", 0.0)
-
-                search_results += (
-                    f"{i}. **{title}** (相关度: {score:.3f})\n"
-                    f"   链接: {url}\n"
-                    f"   {content[:280]}{'...' if len(content) > 280 else ''}\n\n"
-                )
-        else:
-            search_results += "未找到任何搜索结果。\n"
-
-        return {
-            "search_results": search_results.strip(),
-            "step": "searched",
-            "messages": [AIMessage(content="搜索完成~ 正在整理答案...")],
-        }
-    except Exception as e:
-        return {
-            "search_results": f"搜索失败：{e}",
-            "step": "search_failed",
-            "messages": [AIMessage(content=" 搜索遇到问题...")],
-        }
-
-
 def sorcery_answer_node(state: SearchState) -> dict:
     intent = state.get("intent", "search")
     final_answer = state.get("final_answer", "")
 
-    # 只有 search 路径允许改写搜索词重跑；file_read / chat 直接通过
+    # 只有 search 路径允许评估并要求重试；其它意图直接通过
     if intent != "search":
         return {
             "final_answer": final_answer,
@@ -402,12 +338,16 @@ def sorcery_answer_node(state: SearchState) -> dict:
     if "评分：re_search" in response_text and "新搜索词：" in response_text:
         new_search_query = response_text.split("新搜索词：", 1)[1].strip()
         if new_search_query:
+            retry_msg = (
+                f"前一次回答不够理想，请调用 tavily_search 工具用以下关键词重新搜索后再作答：{new_search_query}"
+            )
             return {
                 "search_query": new_search_query,
                 "retry_count": retry_count + 1,
                 "step": "retry_search",
                 "messages": [
-                    AIMessage(content=f"当前答案不够理想，改为搜索：{new_search_query}")
+                    AIMessage(content=f"当前答案不够理想，改为搜索：{new_search_query}"),
+                    HumanMessage(content=retry_msg),
                 ],
             }
 

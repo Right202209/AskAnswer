@@ -18,31 +18,62 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from .load import model
+from .nodes import _local_intent
 from .registry import get_registry
 from .schema import ContextSchema
 from .state import SearchState
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 
 
+def _reclassify_intent(state: SearchState) -> str | None:
+    """Re-derive intent from the latest human turn so mid-conversation topic
+    shifts (e.g. chat → SQL) rebind the tool bundle on the next iteration.
+
+    Returns the new intent string, or ``None`` if the latest message isn't a
+    fresh human turn (we don't flap intent while a tool call is in flight) or
+    the local classifier is uncertain.
+    """
+    if state.get("step") == "retry_search":
+        # Sorcery's retry HumanMessage is synthetic, not a fresh user turn —
+        # the original intent already settled in ``understand_query_node`` and
+        # the retry path only fires for search anyway.
+        return None
+    messages = state.get("messages") or []
+    if not messages:
+        return None
+    last = messages[-1]
+    if not isinstance(last, HumanMessage):
+        return None
+    fields = _local_intent(getattr(last, "content", "") or "")
+    if fields is None:
+        return None
+    return fields["intent"]
+
+
 def _answer_node(state: SearchState) -> dict:
-    intent = state.get("intent", "search")
+    new_intent = _reclassify_intent(state)
+    intent = new_intent or state.get("intent", "search")
     search_results = state.get("search_results", "")
 
     if intent == "chat":
         context_line = "（这是闲聊或常识类问题，不需要搜索结果；可直接回答或调用合适的工具。）"
     elif intent == "sql":
         context_line = "（这是数据库/SQL 类问题；如需查询数据，调用 sql_query 工具。）"
-    elif state.get("step") == "search_failed":
-        context_line = "（搜索 API 暂不可用，请基于已有知识或调用工具回答。）"
+    elif intent == "file_read":
+        file_path = state.get("file_path") or ""
+        if file_path:
+            context_line = f"（这是读文件请求，请调用 read_file 工具读取 `{file_path}` 后再作答。）"
+        else:
+            context_line = "（这是读文件请求，请调用 read_file 工具读取目标文件后再作答。）"
     elif not search_results:
-        context_line = "（没有可用的搜索结果，请基于已有知识或调用工具回答。）"
+        context_line = "（如需联网信息请调用 tavily_search 工具，否则基于已有知识回答。）"
     else:
         context_line = f"以下是搜索结果，可作为参考：\n{search_results}"
 
@@ -63,12 +94,18 @@ def _answer_node(state: SearchState) -> dict:
 
     tool_calls = getattr(response, "tool_calls", None) or []
     if tool_calls:
-        return {"step": "tool_called", "messages": [response]}
-    return {
+        out: dict = {"step": "tool_called", "messages": [response]}
+        if new_intent and new_intent != state.get("intent"):
+            out["intent"] = new_intent
+        return out
+    out = {
         "final_answer": response.content,
         "step": "completed",
         "messages": [response],
     }
+    if new_intent and new_intent != state.get("intent"):
+        out["intent"] = new_intent
+    return out
 
 
 def _shell_plan_node(state: SearchState) -> dict:

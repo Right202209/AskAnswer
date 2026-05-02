@@ -79,45 +79,48 @@ askanswer --graph docs/graph.mmd  # 写入 Mermaid 图文件
 
 ```
 askanswer/
-├── cli.py        # 命令行入口：欢迎框、斜线命令、流式进度、Markdown 渲染
-├── graph.py      # LangGraph 工作流编排
-├── nodes.py      # 节点实现：理解分流 / 搜索 / 读文件 / 回答 / 自评 / 工具
-├── state.py      # SearchState 定义（含 intent / file_path）
-├── tools.py      # 工具集
-├── mcp.py        # MCP 客户端管理器：URL (HTTP/SSE) + stdio，多服务聚合
-├── load.py       # 模型、Tavily、API key 加载
-└── __main__.py   # python -m 入口
+├── cli.py               # 命令行入口：欢迎框、斜线命令、流式进度、Markdown 渲染
+├── graph.py             # 父图编排：understand → answer(react) → sorcery
+├── react.py             # answer 节点对应的 react 子图（answer ⇄ tools / shell_plan）
+├── _react_internals.py  # react 子图节点实现（含意图重判 _reclassify_intent）
+├── nodes.py             # 父图节点：意图识别、自评回写
+├── state.py             # SearchState（含 intent / file_path / pending_shell）
+├── schema.py            # ContextSchema：runtime context（db_dsn、tenant 等）
+├── tools.py             # 内置工具（搜索、读文件、天气、计算、IP、shell …）
+├── registry.py          # ToolRegistry：按 bundle 暴露工具，含 MCP 包装
+├── mcp.py               # MCP 客户端管理器：URL (HTTP/SSE) + stdio，多服务聚合
+├── sqlagent/            # SQL agent 子图，作为 sql_query 工具暴露
+├── load.py              # 模型、Tavily、API key 加载
+└── __main__.py          # python -m 入口
 ```
 
 ## 工作流
 
 ```
-START → understand ─┬─ file_read ───────────┐
-                    ├─ sql ──────────────── END
-                    ├─ answer (chat) ───────┤
-                    └─ search → answer ─────┤
-                         answer ⇄ tools     │
-                                            ▼
-                                         sorcery ─ {search 重搜 | END}
+START → understand → answer ⇄ tools / shell_plan → sorcery → {answer 重跑 | END}
 ```
 
-- `understand`：分类用户意图为 `file_read` / `sql` / `chat` / `search`，并提取文件路径或搜索关键词
-- `file_read`：直接调用 `read_file` 工具读取并分析本地文件
-- `sql`：从 runtime context 读取数据库配置，调用 SQL agent 查询数据库
-- `search`：Tavily 检索 Top 5
-- `answer`：模型已绑定工具，可按需调用；整合搜索 / 工具结果给出回答
-- `tools`：执行模型发起的工具调用，结果回写后重入 `answer`
-- `sorcery`：自评答案质量；仅 `search` 路径允许改写关键词重跑一次
+- `understand`：本地分类器优先（关键词 / 正则）判断意图为 `file_read` / `sql` / `chat` / `search`，仅在歧义时调用 LLM；提取文件路径或搜索关键词
+- `answer`：react 子图的入口。按当前 `intent` 选择系统提示词与可见工具集（`registry.list(bundle=intent)`）；每轮还会用 `_reclassify_intent` 复判最新一条用户消息，使会话中途的话题切换（chat → SQL 等）实时切换工具集
+- `tools`：执行模型发起的工具调用（`tavily_search` / `read_file` / `sql_query` / 各类内置工具 / MCP 工具 …），结果回写后重入 `answer`
+- `shell_plan`：`gen_shell_commands_run` 走人机确认分支，预生成命令并 `interrupt()` 等待用户批准
+- `sorcery`：自评答案质量；仅 `search` 路径允许改写关键词重跑一次（注入 `HumanMessage` 让模型重新调用 `tavily_search`）
 
 ## 工具集
 
+模型在 `_answer_node` 已 `bind_tools(...)`，按当前意图过滤的工具集来自 `ToolRegistry`；内置工具默认对所有意图可见，shell 工具不进入 SQL bundle。
+
 | 工具 | 说明 |
 | --- | --- |
-| `read_file` | 读取 `.txt` / `.md` / `.json` / `.csv` / `.xlsx` 并由 LLM 分析 |
+| `tavily_search` | Tavily 联网搜索 Top 5 + 综合答案 |
+| `read_file` | `markitdown` 解析任意文件（txt/md/json/csv/xlsx/pdf/docx/代码 …）后由 LLM 总结 |
+| `sql_query` | 自然语言转 SQL：调用 SQL agent 子图，从 runtime context 读取 DSN/方言/租户 |
 | `check_weather` | OpenWeather 实时天气 |
 | `get_current_time` | 指定时区当前时间 |
 | `calculate` | 安全表达式计算（+ - * / // % ** 与括号） |
 | `convert_currency` | 货币汇率换算 |
 | `lookup_ip` | IP 地理位置与运营商查询 |
+| `pwd` | 当前工作目录 |
+| `gen_shell_commands_run` | 生成并执行单条 shell 命令；高风险模式直接拦截，其余命令在 `interrupt()` 处暂停等待用户确认/编辑 |
 
-模型在 `answer` 节点已 `bind_tools(tools)`，会按需自行调用；`tools_node` 负责执行并回传 `ToolMessage`。
+通过 `/mcp` 接入的 MCP 工具会以 `<server>__<tool>` 形式自动加入注册表，对所有意图可见。
