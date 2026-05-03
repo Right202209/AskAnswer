@@ -57,7 +57,7 @@ Built-in tools (including `tavily_search` and `read_file`) are registered in **a
 
 The SQL flow is **exposed as a tool**, not as a parent-graph node. `sql_tool.sql_query` is the registry entry (bundle: `chat | sql`); when invoked, it calls `sql_agent.run_sql_agent` which executes a separate `StateGraph(SqlAgentState, context_schema=ContextSchema)` from `build_sql_agent()`. Internal flow: `list_tables → call_get_schema → get_schema → generate_query → (check_query → run_query → generate_query)*`. Hard caps: `MAX_SQL_QUERY_CALLS = 2`, `SQL_RECURSION_LIMIT = 12` — when exceeded, routes to `limit_exceeded` which returns the latest tool output rather than 502'ing.
 
-`sql_query` reads `runtime.context` via `ToolRuntime[ContextSchema]`, so the parent's `db_dsn` / dialect / tenant flow in automatically. `sql_interact.py` caches `SQLDatabase` / `SQLDatabaseToolkit` / tool tuples by DSN (`lru_cache(maxsize=16)`). Schema/list/query observations are truncated by `_trim_observation` in `sql_node.py` (table list 4k, schema 12k, query result 8k chars) to keep prompts bounded.
+`sql_query` reads `runtime.context` via `ToolRuntime[ContextSchema]`, so the parent's `db_dsn` / dialect / tenant flow in automatically. `sql_interact.py` caches `SQLDatabase` / `SQLDatabaseToolkit` / tool tuples by DSN (`lru_cache(maxsize=16)`) and augments LangChain's stock toolkit with two extras: `get_schema` (a thin wrapper that calls `database.get_table_info`) and `find_slow_sql` (PostgreSQL-only, queries `pg_stat_statements`; returns a friendly error on other dialects). Schema/list/query observations are truncated by `_trim_observation` in `sql_node.py` (table list 4k, schema 12k, query result 8k chars) to keep prompts bounded.
 
 ### MCP (`askanswer/mcp.py`)
 
@@ -69,7 +69,11 @@ The `gen_shell_commands_run` tool is special-cased via `requires_confirmation=Tr
 
 ### CLI (`askanswer/cli.py`)
 
-Hand-rolled REPL: ANSI styling in class `C`, double-width-aware padding (`_visual_width`), boxed input prompt, per-node progress markers (`⏺ Node(detail)`) rendered from `app.stream(stream_mode="updates")`. Slash commands (`/help`, `/clear`, `/status`, `/mcp …`, `/exit`) are routed by `handle_command`. The `!<cmd>` prefix bypasses the graph entirely and runs a shell command after a danger check.
+Hand-rolled REPL: ANSI styling in class `C`, double-width-aware padding (`_visual_width`), boxed input prompt, per-node progress markers (`⏺ Node(detail)`) rendered from `app.stream(stream_mode="updates")`. Slash commands (`/help`, `/clear`, `/status`, `/model`, `/mcp …`, `/exit`) are routed by `handle_command`. The `!<cmd>` prefix bypasses the graph entirely and runs a shell command after a danger check.
+
+### Model loading & swap (`askanswer/load.py`)
+
+`model` is a `_ModelProxy` wrapping the real `init_chat_model(...)` backend. Modules import it once at startup; `set_model("provider:name")` (called by `/model`) builds a new backend and `_swap`s it in place via `object.__setattr__`, so every existing reference is automatically redirected. **Always import `model` from `.load` and call through it** — never cache the inner backend, or you'll keep talking to the old model after `/model`. `current_model_label()` returns the active `provider:spec` for diagnostics.
 
 ## Conventions
 
