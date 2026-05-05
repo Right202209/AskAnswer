@@ -1,3 +1,6 @@
+# 内置工具集合：天气、时间、计算、汇率、IP、读文件、联网搜索、shell 执行等。
+# 这里定义的每个 @tool 函数都会通过 registry.py 注册到统一工具表，
+# 然后由 react 子图按 intent 暴露给 LLM。
 import ast, csv, json, operator, re
 import os
 import platform
@@ -17,9 +20,11 @@ from .load import openweather_api_key, model, tavily_client
 def check_weather(city: str) -> str:
     """查询指定城市的实时天气。参数 city 为城市名，例如 Beijing。"""
 
+    # API Key 缺失时给出明确提示，而不是抛异常 —— 更友好且不影响图流程
     if not openweather_api_key:
         return "未配置 OPENWEATHER_API_KEY"
 
+    # 拼接 OpenWeather One Call 接口的查询串：公制单位 + 中文描述
     query = urlencode(
         {
             "q": city,
@@ -34,9 +39,11 @@ def check_weather(city: str) -> str:
         with urlopen(url) as response:
             data = json.loads(response.read().decode("utf-8"))
 
+        # 接口返回 cod 字段表示状态；非 200 视为查询失败
         if str(data.get("cod")) != "200":
             return f"天气查询失败：{data.get('message', 'unknown error')}"
 
+        # 解析关键字段并组装为人类可读的一句话
         weather = data["weather"][0]["description"]
         temp = data["main"]["temp"]
         feels_like = data["main"]["feels_like"]
@@ -48,6 +55,7 @@ def check_weather(city: str) -> str:
             f"气温 {temp}°C，体感 {feels_like}°C，湿度 {humidity}%"
         )
     except Exception as exc:
+        # 网络/解析异常都包成字符串返回，避免 ToolNode 因异常而报错
         return f"天气查询失败：{exc}"
 
 @tool
@@ -55,12 +63,15 @@ def get_current_time(timezone: str = "Asia/Shanghai") -> str:
     """获取指定时区的当前时间。参数 timezone 形如 'Asia/Shanghai' / 'America/New_York' / 'UTC'，默认上海。"""
 
     try:
+        # ZoneInfo 是 Python 3.9+ 的官方时区库，无需额外依赖
         now = datetime.now(ZoneInfo(timezone))
         return f"{timezone} 当前时间：{now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
     except Exception as exc:
+        # 时区拼写错误等会走到这里
         return f"时间查询失败：{exc}"
 
 
+# 计算器允许的 AST 操作符白名单：避免 eval 任意代码注入
 _ALLOWED_OPS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -74,12 +85,15 @@ _ALLOWED_OPS = {
 }
 
 def _safe_eval(node: ast.AST) -> float:
+    """递归地对 AST 节点求值，仅允许白名单操作符与数字字面量。"""
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return node.value
     if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_OPS:
+        # 二元运算：左右子节点先递归求值再用对应 operator 函数
         return _ALLOWED_OPS[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
     if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_OPS:
         return _ALLOWED_OPS[type(node.op)](_safe_eval(node.operand))
+    # 任何不在白名单内的语法都直接拒绝
     raise ValueError("不支持的表达式")
 
 
@@ -88,6 +102,7 @@ def calculate(expression: str) -> str:
     """计算数学表达式。支持 + - * / // % ** 和括号，例如 '(3+4)*2'。"""
 
     try:
+        # 用 ast.parse 而非 eval：可以严格控制可执行的语法
         tree = ast.parse(expression, mode="eval")
         result = _safe_eval(tree.body)
         return f"{expression} = {result}"
@@ -99,6 +114,7 @@ def calculate(expression: str) -> str:
 def convert_currency(amount: float, from_currency: str, to_currency: str) -> str:
     """货币汇率换算。参数：amount 金额；from_currency 源币种代码(如 USD)；to_currency 目标币种代码(如 CNY)。"""
 
+    # 统一转大写，open.er-api 接口对大小写敏感
     base = from_currency.upper()
     target = to_currency.upper()
     url = f"https://open.er-api.com/v6/latest/{base}"
@@ -110,6 +126,7 @@ def convert_currency(amount: float, from_currency: str, to_currency: str) -> str
         if data.get("result") != "success":
             return f"汇率查询失败：{data.get('error-type', 'unknown error')}"
 
+        # rates 是 {"USD": 1.0, "CNY": 7.x, ...} 这样的字典
         rate = data.get("rates", {}).get(target)
         if rate is None:
             return f"未找到 {base} → {target} 的汇率"
@@ -124,9 +141,11 @@ def lookup_ip(ip: str = "") -> str:
     """查询 IP 地址的地理位置与运营商信息。参数 ip 留空则查询当前出口 IP。"""
 
     target = ip.strip()
+    # ipapi 的接口形式：/{ip}/json/，留空则查询调用端自身公网 IP
     url = f"https://ipapi.co/{target + '/' if target else ''}json/"
 
     try:
+        # 显式带 UA：部分免费接口会拒绝缺省 UA
         request = Request(url, headers={"User-Agent": "AskAnswer/0.1"})
         with urlopen(request, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -150,7 +169,9 @@ def read_file(path: str) -> str:
     参数: path (str): 文件路径
     返回: str: AI 对文件内容的分析结果
     """
+    # 先用 markitdown 把任何格式（pdf/docx/xlsx/...）转成统一的 Markdown 文本
     data = markitdown(path)
+    # 再交给 LLM 做语义分析；结构化文件说字段，代码文件解释逻辑
     resp = model.invoke(f"分析这个文件,解释内容，"
                  f"包括结构、用途和关键信息。"
                  f"如果是代码就解释逻辑，如果是数据文件就说明字段，如果是二进制文件就说明用途。"
@@ -158,6 +179,7 @@ def read_file(path: str) -> str:
     return resp.content
 
 def markitdown(file_path: str) -> str:
+    """把任意支持的文件类型转成 Markdown 文本，作为 read_file 的预处理步骤。"""
     md = MarkItDown(enable_plugins=True)
     result = md.convert(file_path)
     return result.text_content
@@ -168,6 +190,7 @@ def tavily_search(query: str) -> str:
     """联网搜索实时或最新信息。参数 query 为搜索关键词，返回 Top 5 网页摘要与 Tavily 综合回答。"""
 
     try:
+        # search_depth=basic 速度快；include_answer 让 Tavily 顺带给一个综合摘要
         response = tavily_client.search(
             query=query, search_depth="basic", max_results=5, include_answer=True
         )
@@ -177,6 +200,7 @@ def tavily_search(query: str) -> str:
     results = response.get("results", [])
     tavily_answer = (response.get("answer") or "").strip()
 
+    # 拼装为 Markdown 形式，便于 LLM 直接引用并呈现给用户
     out = f"查询关键词：{query}\n\n"
     if tavily_answer:
         out += f"Tavily 摘要：{tavily_answer}\n\n"
@@ -191,6 +215,7 @@ def tavily_search(query: str) -> str:
         url = result.get("url", "#")
         content = result.get("content", "无内容摘要")
         score = result.get("score", 0.0)
+        # 内容过长时截断，避免 prompt 爆炸
         out += (
             f"{i}. **{title}** (相关度: {score:.3f})\n"
             f"   链接: {url}\n"
@@ -210,6 +235,7 @@ def pwd()->str:
     return current_directory
 
 
+# 高风险命令模式列表：在“生成命令”和“用户编辑命令”两个时机都会被检查
 _DANGEROUS_PATTERNS = [
     (r"\brm\b", "rm 删除命令"),
     (r"\brmdir\b", "rmdir 目录删除"),
@@ -231,6 +257,7 @@ _DANGEROUS_PATTERNS = [
 
 
 def _check_dangerous(command: str) -> str | None:
+    """检查命令是否命中危险模式，命中返回中文描述，否则返回 None。"""
     for pattern, desc in _DANGEROUS_PATTERNS:
         if re.search(pattern, command):
             return desc
@@ -238,6 +265,7 @@ def _check_dangerous(command: str) -> str | None:
 
 
 def _clean_command(raw: str) -> str:
+    """清理 LLM 输出里偶尔残留的 ``` 代码块围栏与开头的 $ 提示符。"""
     s = raw.strip()
     if s.startswith("```"):
         lines = s.splitlines()
@@ -250,6 +278,11 @@ def _clean_command(raw: str) -> str:
 
 
 def gen_shell_command_spec(instruction: str) -> tuple[str, str]:
+    """根据自然语言指令生成（命令, 解释）二元组。
+
+    会把当前操作系统类型告诉 LLM，让它生成对应平台可直接执行的单条命令。
+    """
+    # 把当前 OS 信息拼到 prompt 里，避免 mac/linux/windows 命令混用
     current_os = platform.system() + " " + platform.release() + " " + platform.machine()
     prompt = (
         f"根据以下用户指令生成在 {current_os} 环境下可直接执行的单条 shell 命令。\n"
@@ -263,6 +296,7 @@ def gen_shell_command_spec(instruction: str) -> tuple[str, str]:
 
     command = ""
     explanation = ""
+    # 逐行扫描；同时兼容中文和英文冒号
     for line in text.splitlines():
         stripped = line.strip()
         for prefix in ("命令：", "命令:"):
@@ -273,12 +307,15 @@ def gen_shell_command_spec(instruction: str) -> tuple[str, str]:
             if stripped.startswith(prefix):
                 explanation = stripped[len(prefix):].strip()
                 break
+    # 兜底：如果两行格式都没匹配上，就把整段当成命令再清理一遍
     command = _clean_command(command or text)
     return command, explanation
 
 
 def execute_shell_command(command: str, shell: bool = False) -> str:
+    """执行 shell 命令并把 stdout/stderr/返回码包成易读的文本返回。"""
     popen_args: str | list[str]
+    # shell=False 时用 shlex 拆分参数，避免命令注入；shell=True 时直接交给 /bin/sh
     if shell:
         popen_args = command
     else:
@@ -295,8 +332,10 @@ def execute_shell_command(command: str, shell: bool = False) -> str:
             stderr=subprocess.PIPE,
             text=True,
         )
+        # 30s 超时：避免误执行长时间运行的命令导致整个图卡住
         stdout, stderr = process.communicate(timeout=30)
     except subprocess.TimeoutExpired:
+        # 超时后必须 kill + 收尸，否则会有僵尸进程
         process.kill()
         process.communicate()
         return f"命令执行超时（>30s）：{command}"
@@ -317,6 +356,7 @@ def execute_shell_command(command: str, shell: bool = False) -> str:
     return "\n".join(parts)
 
 
+# 对外暴露的危险检查别名（_react_internals 与 cli 都会用到）
 check_dangerous = _check_dangerous
 
 
@@ -340,6 +380,7 @@ def gen_shell_commands_run(instruction: str) -> str:
         f"拟执行命令：{command}\n说明：{explanation or '(无)'}"
     )
 
+# 工具集合（旧式 list 形式），仍保留以便外部直接 import；新增工具优先通过 registry 注册
 tools = [
     check_weather,
     get_current_time,
@@ -353,4 +394,5 @@ tools = [
 ]
 
 
+# 工具名 → 工具对象的字典：常用于按名称查找
 tools_by_name = {tool.name: tool for tool in tools}

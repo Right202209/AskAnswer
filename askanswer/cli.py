@@ -1,3 +1,10 @@
+# 命令行入口与交互式 REPL。
+# 设计要点：
+# - 用 ANSI 转义自绘“面板/边框”样式，无第三方 TUI 依赖；
+# - app.stream(stream_mode="updates") 拿到的每个节点更新都渲染成一行进度标记；
+# - HITL（人机确认）场景下监听 __interrupt__，从 CLI 拿用户输入并 Command(resume=...) 续跑；
+# - 斜杠命令（/help、/clear、/status、/model、/mcp、/exit）由 handle_command 路由；
+# - `!<cmd>` 前缀绕开 LangGraph 直接 shell 执行（带危险检查）。
 from __future__ import annotations
 
 import argparse
@@ -23,12 +30,14 @@ from .schema import ContextSchema
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 
 
+# rich 控制台：仅用于把最终答案以 Markdown 形式渲染
 _console = Console()
 
 
 # ── Styling ────────────────────────────────────────────────────────
 
 class C:
+    """ANSI 颜色与样式常量集合，方便在 print 时拼接。"""
     RESET = "\033[0m"
     BOLD = "\033[1m"
     DIM = "\033[2m"
@@ -40,18 +49,23 @@ class C:
     RED = "\033[38;5;203m"
 
 
+# 用于剥离字符串里的 ANSI 序列以便正确计算可视宽度
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# 识别搜索结果里 “1. **标题**” 这种条目的行首
 _HIT_RE = re.compile(r"^\d+\.\s+\*\*", re.MULTILINE)
 
 
 def _strip_ansi(s: str) -> str:
+    """去掉 ANSI 转义序列，剩下的才是真正显示出来的内容。"""
     return _ANSI_RE.sub("", s)
 
 
 def _visual_width(s: str) -> int:
+    """计算字符串在终端里的可视宽度，CJK 全角字符算 2 列。"""
     s = _strip_ansi(s)
     w = 0
     for ch in s:
+        # East Asian Wide / Fullwidth 字符在等宽终端里占两列
         if unicodedata.east_asian_width(ch) in ("W", "F"):
             w += 2
         else:
@@ -60,6 +74,7 @@ def _visual_width(s: str) -> int:
 
 
 def _term_width(max_width: int = 72) -> int:
+    """当前终端宽度，限制在 [40, max_width] 区间，避免极端情况下排版崩溃。"""
     try:
         cols = os.get_terminal_size().columns
     except OSError:
@@ -68,6 +83,7 @@ def _term_width(max_width: int = 72) -> int:
 
 
 def _pad(content: str, inner_width: int) -> str:
+    """把内容右侧补空格到指定可视宽度，配合边框面板使用。"""
     pad = inner_width - _visual_width(content)
     return content + " " * max(pad, 0)
 
@@ -75,6 +91,7 @@ def _pad(content: str, inner_width: int) -> str:
 # ── Blocks ─────────────────────────────────────────────────────────
 
 def _current_model_name() -> str:
+    """尽力拿到当前模型可读名（先用 load.current_model_label，再回退到对象属性）。"""
     label = current_model_label()
     if label:
         return label
@@ -86,6 +103,7 @@ def _current_model_name() -> str:
 
 
 def welcome_box() -> None:
+    """启动时画的欢迎面板。"""
     w = _term_width()
     inner = w - 4
     border = "─" * (w - 2)
@@ -101,11 +119,13 @@ def welcome_box() -> None:
     print()
     print(f"{C.ORANGE}╭{border}╮{C.RESET}")
     for line in lines:
+        # 用 _pad 对齐右侧边框，避免 CJK/ANSI 影响列对齐
         print(f"{C.ORANGE}│{C.RESET} {_pad(line, inner)} {C.ORANGE}│{C.RESET}")
     print(f"{C.ORANGE}╰{border}╯{C.RESET}")
 
 
 def tips_block() -> None:
+    """欢迎面板下方的“使用小贴士”。"""
     print()
     print(f" {C.BOLD}Tips for getting started:{C.RESET}")
     print()
@@ -116,6 +136,7 @@ def tips_block() -> None:
 
 
 def help_block() -> None:
+    """/help 输出的命令清单。"""
     print()
     print(f" {C.BOLD}Commands{C.RESET}")
     print(f"   {C.CYAN}/help{C.RESET}    显示此帮助")
@@ -129,6 +150,7 @@ def help_block() -> None:
 
 
 def mcp_help_block() -> None:
+    """/mcp 子命令帮助。"""
     print()
     print(f" {C.BOLD}/mcp{C.RESET}")
     print(f"   {C.CYAN}/mcp <url> [name]{C.RESET}      连接一个 MCP 服务 (HTTP/SSE)")
@@ -139,6 +161,7 @@ def mcp_help_block() -> None:
 
 
 def status_block(thread_id: str) -> None:
+    """/status 输出：当前线程 ID、CWD、模型、MCP 连接状态。"""
     print()
     print(f" {C.BOLD}Status{C.RESET}")
     print(f"   {C.DIM}thread:{C.RESET}  {thread_id}")
@@ -146,6 +169,7 @@ def status_block(thread_id: str) -> None:
     print(f"   {C.DIM}model:{C.RESET}   {current_model_label()}")
     servers = _mcp_manager().list_servers()
     if servers:
+        # 简洁展示：name(工具数量)，多个 server 用逗号分隔
         summary = ", ".join(f"{s['name']}({s['tools']})" for s in servers)
         print(f"   {C.DIM}mcp:{C.RESET}     {summary}")
     else:
@@ -156,6 +180,7 @@ def status_block(thread_id: str) -> None:
 # ── Streaming progress ────────────────────────────────────────────
 
 def _marker(title: str, detail: str = "") -> str:
+    """生成一行节点进度标记：⏺ Title(detail)。"""
     body = f"{C.BOLD}{title}{C.RESET}"
     if detail:
         body += f"{C.DIM}({detail}){C.RESET}"
@@ -163,11 +188,13 @@ def _marker(title: str, detail: str = "") -> str:
 
 
 def _truncate(s: str, limit: int = 60) -> str:
+    """按可视宽度截断，保留 CJK 不被切半，结尾用省略号占一列。"""
     s = " ".join(str(s or "").split())
     if _visual_width(s) <= limit:
         return s
     out = ""
     for ch in s:
+        # 给省略号留一列宽度
         if _visual_width(out + ch) > limit - 1:
             break
         out += ch
@@ -175,6 +202,7 @@ def _truncate(s: str, limit: int = 60) -> str:
 
 
 def _runtime_context() -> ContextSchema:
+    """从环境变量构造一份 ContextSchema 传给图（CLI 是参数注入的边界）。"""
     return ContextSchema(
         db_dsn=os.getenv("WLANGGRAPH_POSTGRES_DSN") or None,
         db_dialect=os.getenv("ASKANSWER_DB_DIALECT") or None,
@@ -188,14 +216,18 @@ def stream_query(
     thread_id: str,
     runtime_context: ContextSchema | None = None,
 ) -> str:
+    """跑一次完整的图调用，期间逐节点渲染进度，并处理 HITL interrupt。"""
     final_answer = ""
+    # 同一个 thread_id 表示同一段会话，复用 checkpointer 的状态
     config = {"configurable": {"thread_id": thread_id}}
     context = runtime_context or _runtime_context()
+    # 第一次进入图：把用户消息塞进 messages；resume 后会被替换成 Command(...)
     graph_input: object = {"messages": [HumanMessage(content=query)]}
 
     print()
     while True:
         interrupt_payload = None
+        # stream_mode="updates"：每个节点产生增量时回调；__interrupt__ 是特殊通道
         for chunk in app.stream(
             graph_input,
             config=config,
@@ -204,6 +236,7 @@ def stream_query(
         ):
             for node, update in chunk.items():
                 if node == "__interrupt__":
+                    # 节点抛出 interrupt() 时 LangGraph 通过这个伪 node 通知我们
                     interrupt_payload = _extract_interrupt_value(update)
                     continue
                 if not isinstance(update, dict):
@@ -218,9 +251,11 @@ def stream_query(
         if interrupt_payload is None:
             break
 
+        # 拿到中断后弹出确认 UI；用户的回应作为 Command(resume=...) 喂回去继续跑
         resume_value = _prompt_shell_confirmation(interrupt_payload)
         graph_input = Command(resume=resume_value)
 
+    # 兜底：若节点流里没拿到 final_answer，从 state 里找最后一条消息内容
     if not final_answer:
         try:
             state = app.get_state({"configurable": {"thread_id": thread_id}})
@@ -239,7 +274,9 @@ def stream_query(
 
 
 def _render_node_update(node: str, update: dict, final_answer: str) -> str:
+    """根据节点名渲染对应的进度标记，并把 final_answer 顺手记下来。"""
     if node == "understand":
+        # 渲染 intent 与对应的关键信息（搜索词 / 文件路径）
         intent = update.get("intent", "")
         if intent == "file_read":
             detail = f"file_read: {_truncate(update.get('file_path', ''))}"
@@ -251,10 +288,12 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
             detail = f"search: {_truncate(update.get('search_query', ''))}"
         print(_marker("Understand", detail))
     elif node == "file_read":
+        # （兼容老拓扑）file_read 节点已合并到 react 的 read_file 工具
         if update.get("final_answer"):
             final_answer = update["final_answer"]
         print(_marker("FileRead", "读取完成"))
     elif node == "search":
+        # （兼容老拓扑）search 作为独立节点的版本
         if update.get("step") == "search_failed":
             print(_marker("Search", "失败，回退到模型知识"))
         else:
@@ -281,11 +320,13 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
         detail = f"生成 {len(plans)} 条命令" if plans else "规划完成"
         print(_marker("ShellPlan", detail))
     else:
+        # 兜底：未知节点也给一行标记，至少能看到流转
         print(_marker(node))
     return final_answer
 
 
 def _extract_interrupt_value(update):
+    """LangGraph 不同版本里 __interrupt__ 的载荷形态不同，做一层兼容。"""
     if isinstance(update, (list, tuple)) and update:
         first = update[0]
     else:
@@ -294,6 +335,7 @@ def _extract_interrupt_value(update):
 
 
 def _pending_interrupt(app, config):
+    """从 state.tasks 里反查是否还有挂起的 interrupt，作为兜底。"""
     try:
         snapshot = app.get_state(config)
     except Exception:
@@ -308,11 +350,13 @@ def _pending_interrupt(app, config):
 
 
 def _prompt_shell_confirmation(payload) -> dict:
+    """用文本 UI 提示用户确认 shell 命令；支持 y/n/e（编辑后再生成）。"""
     data = payload if isinstance(payload, dict) else {}
     command = data.get("command") or str(payload)
     explanation = data.get("explanation") or ""
     instruction = data.get("instruction") or ""
 
+    # 循环：用户选 e 编辑指令时，重新生成命令并再次询问
     while True:
         print()
         print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}需要确认 Shell 命令{C.RESET}")
@@ -328,14 +372,18 @@ def _prompt_shell_confirmation(payload) -> dict:
         try:
             reply = input(f"    {C.ORANGE}你的选择 (y/N/e):{C.RESET} ").strip().lower()
         except EOFError:
+            # Ctrl-D：等价于取消
             reply = ""
         except KeyboardInterrupt:
+            # Ctrl-C：等价于取消
             reply = ""
             print()
 
         if reply in ("y", "yes"):
+            # 批准：让节点真正执行命令
             return {"approve": True, "command": command, "explanation": explanation}
         if reply in ("e", "edit", "more", "add"):
+            # 让用户输入补充说明，再让 LLM 重新生成命令
             more = _read_more_prompt()
             if not more:
                 print(f"    {C.DIM}未输入补充说明，保持原命令。{C.RESET}")
@@ -361,6 +409,7 @@ def _prompt_shell_confirmation(payload) -> dict:
 
 
 def _read_more_prompt() -> str:
+    """让用户输入“补充说明”一行，Ctrl-C/D 视为放弃补充。"""
     try:
         return input(f"    {C.GOLD}补充说明:{C.RESET} ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -371,12 +420,14 @@ def _read_more_prompt() -> str:
 # ── Render ────────────────────────────────────────────────────────
 
 def render_answer(answer: str) -> None:
+    """把最终答案以 Markdown 渲染输出。"""
     print()
     _console.print(Padding(Markdown(answer or "_(空答案)_"), (0, 2)))
     print()
 
 
 def render_error(message: str) -> None:
+    """统一的错误样式：红色叉号 + 灰色细节。"""
     print()
     print(f"  {C.RED}✗ 运行失败{C.RESET}")
     print(f"  {C.DIM}{message}{C.RESET}")
@@ -386,14 +437,17 @@ def render_error(message: str) -> None:
 # ── Bang shell shortcut ───────────────────────────────────────────
 
 def run_bang_command(command: str) -> None:
+    """`!<cmd>` 走绕过 LangGraph 的直执行路径；危险命令仍要二次确认。"""
     command = command.strip()
     if not command:
+        # 空命令：打印用法
         print()
         print(f"  {C.DIM}用法：{C.RESET}{C.CYAN}!<shell command>{C.RESET}  "
               f"{C.DIM}例：!ls -la{C.RESET}")
         print()
         return
 
+    # 命中危险模式：必须用户显式确认
     danger = check_dangerous(command)
     if danger:
         print()
@@ -409,6 +463,7 @@ def run_bang_command(command: str) -> None:
             print()
             return
 
+    # bang 模式 shell=True：保留管道、重定向等用户自己手敲的语法
     output = execute_shell_command(command, shell=True)
 
     print()
@@ -420,6 +475,7 @@ def run_bang_command(command: str) -> None:
 # ── Interactive loop ──────────────────────────────────────────────
 
 def _prompt_boxed_input() -> str:
+    """绘制带边框的输入提示框，用户在框内敲一行；回车后再画底边框。"""
     w = _term_width()
     border = "─" * (w - 2)
     print(f"{C.ORANGE}╭{border}╮{C.RESET}")
@@ -428,11 +484,13 @@ def _prompt_boxed_input() -> str:
     try:
         text = input()
     finally:
+        # finally 保证即使输入异常也会把底边框补完，视觉对齐不破
         print(f"{C.ORANGE}╰{border}╯{C.RESET}")
     return text
 
 
 def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
+    """斜杠命令路由。返回 (是否继续运行, 当前 thread_id)。"""
     stripped = cmd.strip()
     head, _, tail = stripped.partition(" ")
     head_lc = head.lower()
@@ -444,6 +502,7 @@ def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
     if head_lc == "/help":
         help_block()
     elif head_lc == "/clear":
+        # 清屏 + 新建一个 thread_id：等价于一段全新对话
         os.system("cls" if os.name == "nt" else "clear")
         welcome_box()
         thread_id = str(uuid.uuid4())
@@ -463,6 +522,7 @@ def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
 
 
 def handle_model_command(args: str) -> None:
+    """/model：无参数显示当前模型；带参数尝试切换模型。"""
     if not args:
         print()
         print(f"  {C.BOLD}Model{C.RESET}")
@@ -473,6 +533,7 @@ def handle_model_command(args: str) -> None:
         return
 
     try:
+        # set_model 是热替换，所有已 import 的 model 引用都会自动指向新模型
         label = set_model(args)
     except Exception as exc:
         render_error(f"模型切换失败: {exc}")
@@ -484,7 +545,9 @@ def handle_model_command(args: str) -> None:
 
 
 def handle_mcp_command(args: str) -> None:
+    """/mcp 子命令分发：list / tools / remove / 添加（URL 直接形式）。"""
     if not args:
+        # 无参：先列出已连服务，再展示 /mcp 的帮助
         _print_mcp_servers()
         mcp_help_block()
         return
@@ -505,6 +568,7 @@ def handle_mcp_command(args: str) -> None:
     elif first_lc in {"help", "-h", "--help"}:
         mcp_help_block()
     elif first.startswith(("http://", "https://")):
+        # 直接传 URL 等价于添加一个新服务
         _add_mcp_url(first, rest or None)
     else:
         print(
@@ -515,11 +579,13 @@ def handle_mcp_command(args: str) -> None:
 
 
 def _add_mcp_url(url: str, name: str | None) -> None:
+    """连接一个 HTTP/SSE 类的 MCP 服务，并刷新工具注册表。"""
     try:
         registered = _mcp_manager().add_url(url, name=name)
     except Exception as exc:
         render_error(f"MCP 连接失败: {exc}")
         return
+    # 注册表里 mcp:* 这一片需要重新拉取
     get_registry().refresh_mcp()
     tools = _mcp_manager().list_tools(server=registered)
     print()
@@ -538,6 +604,7 @@ def _add_mcp_url(url: str, name: str | None) -> None:
 
 
 def _remove_mcp_server(name: str) -> None:
+    """断开指定 MCP 服务并刷新注册表。"""
     ok = _mcp_manager().remove(name)
     if ok:
         get_registry().refresh_mcp()
@@ -550,6 +617,7 @@ def _remove_mcp_server(name: str) -> None:
 
 
 def _print_mcp_servers() -> None:
+    """打印已连接的 MCP 服务清单。"""
     servers = _mcp_manager().list_servers()
     print()
     if not servers:
@@ -568,6 +636,7 @@ def _print_mcp_servers() -> None:
 
 
 def _print_mcp_tools(server: str | None) -> None:
+    """打印某个 server（或全部 server）下的工具列表。"""
     tools = _mcp_manager().list_tools(server=server)
     print()
     if not tools:
@@ -584,6 +653,8 @@ def _print_mcp_tools(server: str | None) -> None:
 
 
 def interactive_loop(app) -> int:
+    """REPL 主循环：每轮读一行用户输入，按前缀决定走哪个分支。"""
+    # 一个会话用一个 thread_id；/clear 会替换它
     thread_id = str(uuid.uuid4())
 
     welcome_box()
@@ -593,25 +664,30 @@ def interactive_loop(app) -> int:
         try:
             text = _prompt_boxed_input().strip()
         except EOFError:
+            # Ctrl-D：退出
             print(f"\n{C.DIM}再见。{C.RESET}")
             return 0
         except KeyboardInterrupt:
+            # Ctrl-C：仅取消当前输入，回到下一轮
             print(f"\n{C.DIM}(已取消，输入 /exit 退出){C.RESET}")
             continue
 
         if not text:
             continue
 
+        # 斜杠命令：走 handle_command 分发
         if text.startswith("/"):
             keep_going, thread_id = handle_command(text, thread_id=thread_id)
             if not keep_going:
                 return 0
             continue
 
+        # ! 前缀：直执行 shell
         if text.startswith("!"):
             run_bang_command(text[1:])
             continue
 
+        # 普通输入：交给 LangGraph 处理
         try:
             answer = stream_query(app, text, thread_id)
         except Exception as exc:
@@ -622,6 +698,7 @@ def interactive_loop(app) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """命令行参数解析器：支持单次问答、--graph 导出图。"""
     parser = argparse.ArgumentParser(description="AskAnswer 命令行工具")
     parser.add_argument(
         "--graph",
@@ -635,16 +712,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def export_graph(target: str) -> int:
+    """导出 LangGraph Mermaid 图到指定路径或 stdout。"""
     try:
         mermaid = draw_search_assistant_mermaid()
     except Exception as exc:
         render_error(f"生成图失败: {exc}")
         return 1
 
+    # "-" 表示输出到 stdout
     if target == "-":
         print(mermaid)
         return 0
 
+    # 否则写入文件，目录不存在就先创建
     path = Path(target)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -658,21 +738,26 @@ def export_graph(target: str) -> int:
 
 
 def main() -> int:
+    """CLI 程序入口：解析参数 → 注册 atexit → 进入对应模式。"""
     parser = build_parser()
     args = parser.parse_args()
 
+    # 保证退出时关闭 MCP 后台 loop，避免守护线程残留
     atexit.register(_mcp_shutdown)
 
+    # 仅导图模式：不需要构建主图，直接输出 Mermaid
     if args.graph is not None:
         return export_graph(args.graph)
 
     try:
-        get_registry()  # seed built-in + sql + (any pre-existing MCP) before first query
+        # seed 一次注册表（内置 + sql + 任何已存在的 MCP），后续节点直接用
+        get_registry()
         app = create_search_assistant()
     except Exception as exc:
         render_error(f"初始化失败: {exc}")
         return 1
 
+    # 单次问答模式：命令行直接给了 question
     if args.question:
         thread_id = str(uuid.uuid4())
         try:
@@ -683,6 +768,7 @@ def main() -> int:
         render_answer(answer)
         return 0
 
+    # 没问题参数则进入 REPL
     return interactive_loop(app)
 
 

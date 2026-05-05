@@ -1,10 +1,9 @@
-"""Unified tool registry for built-in, MCP, and SQL tools.
+"""统一工具注册表：内置工具、MCP 工具、SQL 工具的唯一真相源。
 
-Each tool is tagged with one or more ``bundles`` (intent groupings) so the
-``answer`` node can bind only the tools relevant to the current intent. Tools
-that need human approval (currently the shell tool) are flagged via
-``requires_confirmation``; the react subgraph routes those through the
-``shell_plan`` HITL flow instead of the regular ``ToolNode`` dispatch.
+每个工具会贴上一个或多个 ``bundles`` 标签（与 intent 一一对应），``answer`` 节点
+按当前 intent 取对应 bundle 内的工具绑定给 LLM。需要人工确认的工具（目前只有
+shell 工具）通过 ``requires_confirmation`` 标记，react 子图会把它们路由到
+``shell_plan`` HITL 流程，而非走普通 ``ToolNode`` 直接执行。
 """
 
 from __future__ import annotations
@@ -23,41 +22,48 @@ from .mcp import get_manager as _mcp_manager
 _LOG = logging.getLogger(__name__)
 
 
-# Bundle constants — mirrored from intent labels in ``nodes.py``.
+# Bundle 名称常量 —— 与 nodes.py 里 intent 标签保持一致。
 BUNDLE_CHAT = "chat"
 BUNDLE_SEARCH = "search"
 BUNDLE_FILE = "file_read"
 BUNDLE_SQL = "sql"
 ALL_BUNDLES = frozenset({BUNDLE_CHAT, BUNDLE_SEARCH, BUNDLE_FILE, BUNDLE_SQL})
 
-# Built-in helpers are reachable from every intent so the react loop can
-# freely chain file_read / search / chat / sql tools (e.g. SQL mode reading
-# a CSV, chat mode searching the web).
+# 内置工具默认在所有 bundle 中可用，方便 react 循环跨 intent 串工具
+# （例如 SQL 模式下也能读 CSV、chat 模式下也能联网搜索）。
 _BUILTIN_BUNDLES = ALL_BUNDLES
+# Shell 工具刻意从 sql bundle 中剔除，让 SQL 流程更聚焦、避免误调用 shell。
 _SHELL_BUNDLES = frozenset({BUNDLE_CHAT, BUNDLE_SEARCH, BUNDLE_FILE})
-# MCP tools come from user-installed servers; expose to all bundles so the
-# model can reach them regardless of intent.
+# MCP 工具来自用户安装的外部服务，统一对所有 bundle 开放。
 _MCP_BUNDLES = ALL_BUNDLES
 
 
 @dataclass(frozen=True)
 class ToolDescriptor:
+    # 真正的工具对象（langchain BaseTool）
     tool: BaseTool
+    # 该工具暴露给哪些 bundle/意图
     bundles: frozenset[str]
+    # 来源标签，便于按前缀批量摘除（如 "mcp:" 重连时清掉旧的）
     source: str                       # "builtin" | "shell" | "sql" | "mcp:<server>"
+    # 是否需要人工确认；当前仅 shell 工具为 True
     requires_confirmation: bool = False
 
 
 class ToolRegistry:
+    """线程安全的工具注册表（单进程内的工具集合的真相源）。"""
+
     def __init__(self) -> None:
         self._tools: dict[str, ToolDescriptor] = {}
         self._lock = Lock()
 
     def register(self, descriptor: ToolDescriptor) -> None:
+        """按工具名注册或覆盖一个工具描述符。"""
         with self._lock:
             self._tools[descriptor.tool.name] = descriptor
 
     def unregister_source_prefix(self, prefix: str) -> None:
+        """按 source 前缀批量摘除（用于重新拉取 MCP 工具列表前先清理旧条目）。"""
         with self._lock:
             for name in [n for n, d in self._tools.items() if d.source.startswith(prefix)]:
                 del self._tools[name]
@@ -67,6 +73,7 @@ class ToolRegistry:
             return self._tools.get(name)
 
     def list(self, bundle: str | None = None) -> list[BaseTool]:
+        """列出所有工具；指定 bundle 时只返回该 bundle 内的工具。"""
         with self._lock:
             descriptors = list(self._tools.values())
         if bundle is None:
@@ -77,20 +84,23 @@ class ToolRegistry:
         return {t.name for t in self.list(bundle)}
 
     def confirmation_names(self) -> set[str]:
+        """返回所有标记为“需要确认”的工具名集合，供 react 子图路由判断。"""
         with self._lock:
             return {n for n, d in self._tools.items() if d.requires_confirmation}
 
     def refresh_mcp(self) -> None:
-        """Rebuild the MCP slice of the registry from the live manager state.
+        """从 MCP 管理器实时同步工具，重建注册表中 mcp 那一片。
 
-        Call after ``/mcp <url>`` connects or ``/mcp remove <name>``.
+        在 ``/mcp <url>`` 连接成功或 ``/mcp remove <name>`` 之后调用。
         """
         try:
             specs = _mcp_manager().list_tools()
         except Exception as exc:
+            # 拉取失败不阻塞主流程，记录 warning 后按空列表处理
             _LOG.warning("MCP list_tools failed during registry refresh: %s", exc)
             specs = []
 
+        # 先把旧的 mcp:* 条目摘掉，避免出现已断开服务的残留工具
         self.unregister_source_prefix("mcp:")
         for spec in specs:
             wrapped = _wrap_mcp_tool(spec)
@@ -105,12 +115,13 @@ class ToolRegistry:
             )
 
 
+# 进程级单例 —— 注册表是全局的，所有节点共享同一份。
 _registry: ToolRegistry | None = None
 _registry_lock = Lock()
 
 
 def get_registry() -> ToolRegistry:
-    """Return the process-wide registry, seeding it on first use."""
+    """获取进程级注册表；首次调用时按需 seed 内置 + SQL + MCP 工具。"""
     global _registry
     with _registry_lock:
         if _registry is None:
@@ -125,6 +136,7 @@ def get_registry() -> ToolRegistry:
 # ── Seeding ──────────────────────────────────────────────────────────
 
 def _seed_builtin(registry: ToolRegistry) -> None:
+    """注册所有内置工具。延迟 import 以避免循环依赖（tools.py 也会反向用到 model）。"""
     from .tools import (
         calculate,
         check_weather,
@@ -137,6 +149,7 @@ def _seed_builtin(registry: ToolRegistry) -> None:
         tavily_search,
     )
 
+    # 普通工具：所有 bundle 都可见
     plain_tools = (
         check_weather,
         get_current_time,
@@ -152,6 +165,7 @@ def _seed_builtin(registry: ToolRegistry) -> None:
             ToolDescriptor(tool=tool, bundles=_BUILTIN_BUNDLES, source="builtin")
         )
 
+    # Shell 工具特殊：bundle 不含 sql + 需要人工确认
     registry.register(
         ToolDescriptor(
             tool=gen_shell_commands_run,
@@ -163,15 +177,17 @@ def _seed_builtin(registry: ToolRegistry) -> None:
 
 
 def _seed_sql(registry: ToolRegistry) -> None:
-    """Register the natural-language SQL tool. Skips if the module is missing."""
+    """注册自然语言 SQL 工具；模块缺失（例如未装 langchain>=1.0）时跳过。"""
     try:
         from .sqlagent.sql_tool import sql_query
     except ImportError as exc:
+        # 不抛异常：让其它工具仍然可用，仅在终端给出明确提示
         import sys
         print(f"[askanswer] sql_query 工具加载失败: {exc}", file=sys.stderr)
         print("[askanswer] 请检查 langchain>=1.0 是否已安装", file=sys.stderr)
         _LOG.warning("sql_query tool unavailable: %s", exc)
         return
+    # SQL 工具仅暴露给 chat 与 sql 两个 bundle，避免在 search/file_read 中干扰判断
     registry.register(
         ToolDescriptor(
             tool=sql_query,
@@ -183,6 +199,7 @@ def _seed_sql(registry: ToolRegistry) -> None:
 
 # ── MCP wrapping ─────────────────────────────────────────────────────
 
+# JSON Schema 类型 → Python 类型的简单映射
 _JSON_TYPE_MAP: dict[str, type] = {
     "string": str,
     "integer": int,
@@ -194,13 +211,14 @@ _JSON_TYPE_MAP: dict[str, type] = {
 
 
 def _jsonschema_to_pydantic(schema: dict, model_name: str) -> type[BaseModel] | None:
-    """Best-effort: build a flat pydantic model from a JSON schema.
+    """尽力把 MCP 工具的 input_schema 转换成扁平的 pydantic 模型。
 
-    Returns ``None`` for non-trivial schemas (anyOf / $ref / nested objects).
-    Caller can then fall back to a permissive schema or skip the tool.
+    遇到 ``anyOf`` / ``$ref`` / 嵌套对象等复杂结构时返回 ``None`` —— 调用方据此
+    回退到宽松 schema 或干脆跳过该工具，避免因 schema 不兼容导致整体崩溃。
     """
     if not isinstance(schema, dict):
         return None
+    # 只支持顶层为 object（或未声明 type）的简单 schema
     if schema.get("type") not in (None, "object"):
         return None
     properties = schema.get("properties") or {}
@@ -209,6 +227,7 @@ def _jsonschema_to_pydantic(schema: dict, model_name: str) -> type[BaseModel] | 
     for name, prop in properties.items():
         if not isinstance(prop, dict):
             return None
+        # 复杂关键字直接放弃，避免转换出错或字段语义不准
         if any(k in prop for k in ("anyOf", "allOf", "oneOf", "$ref")):
             return None
         pytype = _JSON_TYPE_MAP.get(prop.get("type", "string"), str)
@@ -219,8 +238,7 @@ def _jsonschema_to_pydantic(schema: dict, model_name: str) -> type[BaseModel] | 
             field_def = (Optional[pytype], Field(default=prop.get("default"), description=description))
         fields[name] = field_def
     if not fields:
-        # MCP servers sometimes declare zero-arg tools; pydantic needs at
-        # least one field, so add an unused optional placeholder.
+        # 一些 MCP server 会暴露零参工具；pydantic 至少要一个字段，加个占位
         fields["_unused"] = (Optional[str], Field(default=None))
     try:
         return create_model(model_name, **fields)
@@ -230,20 +248,24 @@ def _jsonschema_to_pydantic(schema: dict, model_name: str) -> type[BaseModel] | 
 
 
 def _wrap_mcp_tool(spec: dict) -> BaseTool | None:
+    """把 MCP server 描述的一个工具包装成 langchain ``StructuredTool``。"""
     name = spec.get("name")
     if not name:
         return None
     description = spec.get("description") or name
+    # 自动从 JSON Schema 派生 pydantic 入参模型；不支持时跳过此工具
     args_schema = _jsonschema_to_pydantic(spec.get("input_schema") or {}, f"{name}_args")
     if args_schema is None:
         _LOG.warning("MCP tool %s has unsupported schema; skipping", name)
         return None
 
     def _proxy(**kwargs: Any) -> str:
+        # 占位字段不能传给 MCP server
         kwargs.pop("_unused", None)
         try:
             return _mcp_manager().call_tool(name, kwargs)
         except Exception as exc:
+            # 工具调用失败包成普通字符串返回，让 LLM 看到错误内容并自行决策
             return f"MCP 工具 {name} 调用失败：{exc}"
 
     try:
