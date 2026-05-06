@@ -4,7 +4,7 @@
 
 ## 🔥 P0 · 基础设施（为后续所有改进铺路）
 
-- [ ] **持久化 checkpointer**：把 `InMemorySaver` 换成 `SqliteSaver`（本地文件 `~/.askanswer/state.db`），实现跨进程会话恢复。`graph.py:73`
+- [x] **持久化 checkpointer**：`InMemorySaver` 已替换为 `SqliteSaver`，DB 落在 `~/.askanswer/state.db`（或 `$XDG_DATA_HOME/askanswer/state.db` / `$ASKANSWER_DB_PATH`）。配套 `thread_meta` 表 + `/threads` `/resume` `/title` `/delete` 命令。详见 [`docs/enterprise-persistence-plan.md`](docs/enterprise-persistence-plan.md) 阶段 A。
 - [ ] **结构化输出**：`understand_query_node` 里的 `_parse_labeled` 手写解析（`nodes.py:66-80`）替换为 `model.with_structured_output(IntentSchema)`，字段用 pydantic 约束 `intent: Literal["file_read","chat","search"]`
 - [ ] **`step` / `intent` 收敛为 Literal**：`state.py:11,13` 目前是自由字符串，易写错；换成 `Literal` + `TypedDict` 字面量，IDE 能查错
 - [ ] **LangSmith tracing 接入**：`load.py` 读 `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY`，让每次调用都能在 Smith UI 上回放
@@ -13,8 +13,8 @@
 
 - [ ] **token 级流式**：CLI 目前按节点粒度打印 `⏺ Node(detail)`，换成 `graph.astream(..., stream_mode=["updates","messages"])` 让 `answer` 节点的 token 边生成边打印（还能展示 tool_call 流）
 - [ ] **统一 HITL 入口**：目前只有 shell 走 `interrupt()`（`nodes.py:357`），把 `file_read`（覆盖已有大文件？）和未来写文件类工具都挂到同一个 HITL 协议上
-- [ ] **/resume 与 /threads**：新增斜线命令列出 checkpointer 里历史 thread，支持恢复某个中断过的会话
-- [ ] **/undo**（time-travel）：基于 LangGraph 的 `get_state_history` + `update_state`，让用户在 REPL 里回退到上一步重跑
+- [x] **/resume 与 /threads**：阶段 A 已实现（含 `/title` / `/delete`，挂起 interrupt 检测）。详见 [`docs/enterprise-persistence-plan.md`](docs/enterprise-persistence-plan.md) 阶段 A。
+- [ ] **/undo**（time-travel）：基于 LangGraph 的 `get_state_history` + `update_state`，让用户在 REPL 里回退到上一步重跑。详见 [`docs/enterprise-persistence-plan.md`](docs/enterprise-persistence-plan.md) 阶段 B。
 
 ## 🧠 P1 · 图结构本身
 

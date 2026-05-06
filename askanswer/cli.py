@@ -25,6 +25,11 @@ from rich.padding import Padding
 from .graph import create_search_assistant, draw_search_assistant_mermaid
 from .load import current_model_label, model, set_model
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
+from .persistence import (
+    ThreadMeta,
+    get_persistence,
+    shutdown_persistence,
+)
 from .registry import get_registry
 from .schema import ContextSchema
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
@@ -32,6 +37,11 @@ from .tools import check_dangerous, execute_shell_command, gen_shell_command_spe
 
 # rich 控制台：仅用于把最终答案以 Markdown 形式渲染
 _console = Console()
+
+
+# 缓存最近一次 ``/threads`` 的结果，``/resume <序号>`` / ``/delete <序号>`` 据此寻址。
+# REPL 是单线程的，不需要锁。
+_LAST_LIST: list[ThreadMeta] = []
 
 
 # ── Styling ────────────────────────────────────────────────────────
@@ -139,13 +149,17 @@ def help_block() -> None:
     """/help 输出的命令清单。"""
     print()
     print(f" {C.BOLD}Commands{C.RESET}")
-    print(f"   {C.CYAN}/help{C.RESET}    显示此帮助")
-    print(f"   {C.CYAN}/clear{C.RESET}   清屏并开始新会话")
-    print(f"   {C.CYAN}/status{C.RESET}  查看当前会话信息")
-    print(f"   {C.CYAN}/model{C.RESET}   查看或切换模型 ({C.DIM}/model <provider:name>{C.RESET})")
-    print(f"   {C.CYAN}/mcp{C.RESET}     管理 MCP 服务 ({C.DIM}/mcp 查看子命令{C.RESET})")
-    print(f"   {C.CYAN}/exit{C.RESET}    退出 (也可 /quit, /q, Ctrl-D)")
-    print(f"   {C.CYAN}!<cmd>{C.RESET}   直接执行 shell 命令 (如 !ls -la)")
+    print(f"   {C.CYAN}/help{C.RESET}     显示此帮助")
+    print(f"   {C.CYAN}/clear{C.RESET}    清屏并开始新会话（旧会话保留，可 /threads 找回）")
+    print(f"   {C.CYAN}/status{C.RESET}   查看当前会话信息")
+    print(f"   {C.CYAN}/model{C.RESET}    查看或切换模型 ({C.DIM}/model <provider:name>{C.RESET})")
+    print(f"   {C.CYAN}/mcp{C.RESET}      管理 MCP 服务 ({C.DIM}/mcp 查看子命令{C.RESET})")
+    print(f"   {C.CYAN}/threads{C.RESET}  列出历史会话 ({C.DIM}/threads [关键词]{C.RESET})")
+    print(f"   {C.CYAN}/resume{C.RESET}   恢复指定会话 ({C.DIM}/resume <序号|id 前缀>{C.RESET})")
+    print(f"   {C.CYAN}/title{C.RESET}    给当前会话命名 ({C.DIM}/title <名字>{C.RESET})")
+    print(f"   {C.CYAN}/delete{C.RESET}   删除会话 ({C.DIM}/delete <序号|id 前缀>{C.RESET})")
+    print(f"   {C.CYAN}/exit{C.RESET}     退出 (也可 /quit, /q, Ctrl-D)")
+    print(f"   {C.CYAN}!<cmd>{C.RESET}    直接执行 shell 命令 (如 !ls -la)")
     print()
 
 
@@ -161,12 +175,26 @@ def mcp_help_block() -> None:
 
 
 def status_block(thread_id: str) -> None:
-    """/status 输出：当前线程 ID、CWD、模型、MCP 连接状态。"""
+    """/status 输出：当前线程 ID、CWD、模型、MCP 连接状态、持久化信息。"""
     print()
     print(f" {C.BOLD}Status{C.RESET}")
     print(f"   {C.DIM}thread:{C.RESET}  {thread_id}")
+    # 当前线程标题（若已命名）
+    try:
+        meta = get_persistence().get_meta(thread_id)
+    except Exception:
+        meta = None
+    if meta and meta.title:
+        print(f"   {C.DIM}title:{C.RESET}   {meta.title}")
     print(f"   {C.DIM}cwd:{C.RESET}     {Path.cwd()}")
     print(f"   {C.DIM}model:{C.RESET}   {current_model_label()}")
+    # 持久化信息：DB 路径 + 已存的线程总数
+    try:
+        pm = get_persistence()
+        thread_count = len(pm.list_threads(limit=10000))
+        print(f"   {C.DIM}store:{C.RESET}   {pm.db_path}  {C.DIM}({thread_count} threads){C.RESET}")
+    except Exception:
+        pass
     servers = _mcp_manager().list_servers()
     if servers:
         # 简洁展示：name(工具数量)，多个 server 用逗号分隔
@@ -269,6 +297,24 @@ def stream_query(
                         final_answer = content
         except Exception:
             pass
+
+    # 持久化线程元数据：每次问答后写一行（首次写入会自动取 preview 前 30 字符做 title）。
+    # 失败不影响主流程 —— 用户拿到回答比记账更重要。
+    try:
+        meta_state = app.get_state(config)
+        meta_values = getattr(meta_state, "values", {}) or {}
+        msgs = meta_values.get("messages") or []
+        human_count = sum(1 for m in msgs if isinstance(m, HumanMessage))
+        preview_text = (query or "").strip().replace("\n", " ")[:80] or None
+        get_persistence().upsert_meta(
+            thread_id,
+            intent=meta_values.get("intent"),
+            model_label=current_model_label(),
+            preview=preview_text,
+            message_count=human_count,
+        )
+    except Exception:
+        pass
 
     return final_answer or "未生成答案。"
 
@@ -489,8 +535,12 @@ def _prompt_boxed_input() -> str:
     return text
 
 
-def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
-    """斜杠命令路由。返回 (是否继续运行, 当前 thread_id)。"""
+def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
+    """斜杠命令路由。返回 (是否继续运行, 当前 thread_id)。
+
+    ``app`` 参数：``/resume`` 需要查询 ``app.get_state`` 检测挂起的 interrupt；
+    其它命令不强依赖。
+    """
     stripped = cmd.strip()
     head, _, tail = stripped.partition(" ")
     head_lc = head.lower()
@@ -502,17 +552,35 @@ def handle_command(cmd: str, *, thread_id: str) -> tuple[bool, str]:
     if head_lc == "/help":
         help_block()
     elif head_lc == "/clear":
-        # 清屏 + 新建一个 thread_id：等价于一段全新对话
+        # 清屏 + 新建一个 thread_id：等价于一段全新对话。旧线程仍保留在 SqliteSaver 里，
+        # 用户可用 /threads 查看 / /resume 恢复 / /delete 删除。
+        old_short = thread_id[:8]
         os.system("cls" if os.name == "nt" else "clear")
         welcome_box()
         thread_id = str(uuid.uuid4())
-        print(f"\n  {C.DIM}已开始新会话：{thread_id[:8]}…{C.RESET}\n")
+        print(
+            f"\n  {C.DIM}已开始新会话：{thread_id[:8]}…  "
+            f"上一段保留为 {old_short}…（/threads 查看 · /delete 删除）{C.RESET}\n"
+        )
     elif head_lc == "/status":
         status_block(thread_id)
     elif head_lc == "/model":
         handle_model_command(tail)
     elif head_lc == "/mcp":
         handle_mcp_command(tail)
+    elif head_lc == "/threads":
+        handle_threads_command(tail, current=thread_id)
+    elif head_lc == "/resume":
+        new_id = handle_resume_command(tail, current=thread_id, app=app)
+        if new_id:
+            thread_id = new_id
+    elif head_lc == "/title":
+        handle_title_command(tail, thread_id=thread_id)
+    elif head_lc == "/delete":
+        new_id = handle_delete_command(tail, current=thread_id)
+        if new_id:
+            # 删的是当前 thread：自动开新会话
+            thread_id = new_id
     else:
         print(
             f"\n  {C.RED}未知命令：{C.RESET}{stripped}  "
@@ -652,6 +720,252 @@ def _print_mcp_tools(server: str | None) -> None:
     print()
 
 
+# ── Threads / Resume / Title / Delete ─────────────────────────────────
+
+def _format_ts(ts: int) -> str:
+    """把 epoch 秒格式化为 ``MM-DD HH:MM`` 紧凑形式（同一年）。"""
+    if not ts:
+        return "—"
+    import time as _t
+    return _t.strftime("%m-%d %H:%M", _t.localtime(ts))
+
+
+def _resolve_thread(arg: str) -> ThreadMeta | None:
+    """把 ``/resume 1`` 或 ``/resume <id 前缀>`` 解析为 ``ThreadMeta``。
+
+    解析顺序：
+    1. 纯数字 → 视作针对最近一次 ``/threads`` 列表的序号；
+    2. 完整 ID 精确匹配；
+    3. 4 字符及以上前缀匹配（多于一条则返回 None 让上层提示歧义）。
+    """
+    arg = (arg or "").strip()
+    if not arg:
+        return None
+    pm = get_persistence()
+
+    # 1) 序号：相对最近一次 /threads 的输出
+    if arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(_LAST_LIST):
+            return _LAST_LIST[idx]
+        return None
+
+    # 2) 完整匹配（UUID 是 36 字符，但允许任意完整 ID）
+    meta = pm.get_meta(arg)
+    if meta is not None:
+        return meta
+
+    # 3) 前缀匹配：≥4 字符才生效，避免 "a" 这种过宽匹配
+    matches = pm.find_by_prefix(arg, limit=2)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _has_pending_interrupt(app, thread_id: str) -> bool:
+    """检测某 thread 是否还有挂起的 ``interrupt()`` 任务（shell HITL 没收尾）。"""
+    if app is None:
+        return False
+    try:
+        snap = app.get_state({"configurable": {"thread_id": thread_id}})
+    except Exception:
+        return False
+    for task in (getattr(snap, "tasks", None) or ()):
+        if getattr(task, "interrupts", None):
+            return True
+    return False
+
+
+def handle_threads_command(args: str, *, current: str) -> None:
+    """``/threads [keyword]``：按 updated_at 倒序列出最近 50 条。"""
+    global _LAST_LIST
+    keyword = args.strip() or None
+    try:
+        threads = get_persistence().list_threads(limit=50, query=keyword)
+    except Exception as exc:
+        render_error(f"读取持久化失败: {exc}")
+        return
+    _LAST_LIST = threads
+
+    print()
+    if not threads:
+        hint = f"无匹配 '{keyword}'" if keyword else "暂无历史会话（先聊几句吧）"
+        print(f"  {C.DIM}（{hint}）{C.RESET}")
+        print()
+        return
+
+    title_word = f" · 关键词: {keyword}" if keyword else ""
+    print(f"  {C.BOLD}Threads ({len(threads)}){title_word}{C.RESET}")
+    for i, m in enumerate(threads, 1):
+        marker = f"{C.GREEN}●{C.RESET}" if m.thread_id == current else " "
+        # 选 title 优先，其次 preview，否则给个占位
+        text = (m.title or m.preview or "(空)").strip().replace("\n", " ")
+        text = _truncate(text, 50)
+        intent = (m.last_intent or "—")[:8]
+        print(
+            f"  {marker} {C.DIM}{i:>2}.{C.RESET} "
+            f"{C.CYAN}{m.thread_id[:8]}{C.RESET}  "
+            f"{C.DIM}{_format_ts(m.updated_at)}{C.RESET}  "
+            f"{C.DIM}{intent:<8}{C.RESET} "
+            f"{C.DIM}{m.message_count}msg{C.RESET}  "
+            f"{text}"
+        )
+    print()
+    print(
+        f"  {C.DIM}用法：{C.RESET}"
+        f"{C.CYAN}/resume <序号|id>{C.RESET}{C.DIM} 恢复 · {C.RESET}"
+        f"{C.CYAN}/title <名字>{C.RESET}{C.DIM} 命名当前 · {C.RESET}"
+        f"{C.CYAN}/delete <序号|id>{C.RESET}{C.DIM} 删除{C.RESET}"
+    )
+    print()
+
+
+def handle_resume_command(args: str, *, current: str, app=None) -> str | None:
+    """``/resume <序号|id 前缀>``：切换 thread_id 到目标会话。
+
+    返回新的 thread_id；解析失败或用户取消时返回 ``None``。
+    """
+    if not args.strip():
+        print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/resume <序号|id 前缀>{C.RESET}\n")
+        return None
+
+    target = _resolve_thread(args)
+    if target is None:
+        print(
+            f"\n  {C.RED}找不到匹配的会话：{C.RESET}{args}  "
+            f"{C.DIM}（先 /threads 看一下序号或 id 前缀）{C.RESET}\n"
+        )
+        return None
+
+    if target.thread_id == current:
+        print(f"\n  {C.DIM}已经在该会话上了：{target.thread_id[:8]}…{C.RESET}\n")
+        return None
+
+    # 关键风险：目标会话上次卡在 shell HITL 没 resume；提醒但不阻断
+    if _has_pending_interrupt(app, target.thread_id):
+        print()
+        print(
+            f"  {C.GOLD}⚠ 该会话上次中断在 shell 确认未完成。{C.RESET}\n"
+            f"    {C.DIM}下一条问题会作为新一轮开始；挂起的确认会被 LangGraph 保留，"
+            f"行为可能怪异。{C.RESET}\n"
+            f"    {C.DIM}如需先恢复挂起项，请取消本次切换并直接在原会话回答 y/N。{C.RESET}"
+        )
+        try:
+            reply = input(f"    {C.ORANGE}仍要切换？(y/N):{C.RESET} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            reply = ""
+        if reply not in ("y", "yes"):
+            print(f"    {C.DIM}已取消。{C.RESET}\n")
+            return None
+
+    label = target.title or target.preview or "(无标题)"
+    print()
+    print(
+        f"  {C.GREEN}✓ 已切换到会话:{C.RESET} "
+        f"{C.CYAN}{target.thread_id[:8]}{C.RESET}  "
+        f"{C.DIM}{_truncate(label, 50)}{C.RESET}"
+    )
+    print(f"  {C.DIM}下一条问题会接续这段会话的历史。{C.RESET}\n")
+    return target.thread_id
+
+
+def handle_title_command(args: str, *, thread_id: str) -> None:
+    """``/title <name>``：给当前会话命名。"""
+    title = args.strip()
+    if not title:
+        try:
+            meta = get_persistence().get_meta(thread_id)
+        except Exception:
+            meta = None
+        current = meta.title if meta else None
+        print()
+        print(f"  {C.BOLD}Title{C.RESET}")
+        print(f"   {C.DIM}current:{C.RESET} {current or '(未命名)'}")
+        print(f"   {C.DIM}usage:{C.RESET}   {C.CYAN}/title <名字>{C.RESET}")
+        print()
+        return
+
+    try:
+        ok = get_persistence().set_title(thread_id, title)
+    except Exception as exc:
+        render_error(f"重命名失败: {exc}")
+        return
+
+    print()
+    if ok:
+        print(f"  {C.GREEN}✓ 已命名:{C.RESET} {title}")
+    else:
+        # 没行被更新：通常是当前会话还没产生任何 final_answer，meta 行尚未写入
+        print(
+            f"  {C.GOLD}⚠ 当前会话尚未持久化{C.RESET}  "
+            f"{C.DIM}（先问一个问题让 thread_meta 写入，再 /title 重命名）{C.RESET}"
+        )
+    print()
+
+
+def handle_delete_command(args: str, *, current: str) -> str | None:
+    """``/delete <序号|id 前缀>``：删除 thread（含 checkpoints + thread_meta）。
+
+    若删除的是 *当前* thread，返回一个新生成的 thread_id 让 REPL 切换；
+    其它情况返回 ``None``。
+    """
+    if not args.strip():
+        print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/delete <序号|id 前缀>{C.RESET}\n")
+        return None
+
+    target = _resolve_thread(args)
+    if target is None:
+        print(
+            f"\n  {C.RED}找不到匹配的会话：{C.RESET}{args}  "
+            f"{C.DIM}（先 /threads 看一下序号或 id 前缀）{C.RESET}\n"
+        )
+        return None
+
+    label = target.title or target.preview or "(无标题)"
+    is_current = target.thread_id == current
+    print()
+    print(f"  {C.RED}⚠  即将删除会话{C.RESET}")
+    print(
+        f"    {C.DIM}id:{C.RESET}    {C.CYAN}{target.thread_id[:8]}{C.RESET}  "
+        f"{C.DIM}{_truncate(label, 50)}{C.RESET}"
+    )
+    if is_current:
+        print(f"    {C.GOLD}这是当前会话；删除后将自动开始新会话。{C.RESET}")
+    print(f"    {C.DIM}操作不可撤销（同步清除 checkpoints + thread_meta）。{C.RESET}")
+    try:
+        reply = input(f"    {C.ORANGE}确认删除? (y/N):{C.RESET} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        reply = ""
+    if reply not in ("y", "yes"):
+        print(f"    {C.DIM}已取消。{C.RESET}\n")
+        return None
+
+    try:
+        ok = get_persistence().delete_thread(target.thread_id)
+    except Exception as exc:
+        render_error(f"删除失败: {exc}")
+        return None
+
+    # _LAST_LIST 里这一条已失效，做个简单清理避免 /resume 误中
+    global _LAST_LIST
+    _LAST_LIST = [m for m in _LAST_LIST if m.thread_id != target.thread_id]
+
+    print()
+    if ok:
+        print(f"  {C.GREEN}✓ 已删除:{C.RESET} {target.thread_id[:8]}…")
+    else:
+        print(f"  {C.GOLD}⚠ thread_meta 中未找到该 ID（可能 checkpoint 已清）{C.RESET}")
+    print()
+
+    if is_current:
+        new_id = str(uuid.uuid4())
+        print(f"  {C.DIM}已开始新会话：{new_id[:8]}…{C.RESET}\n")
+        return new_id
+    return None
+
+
 def interactive_loop(app) -> int:
     """REPL 主循环：每轮读一行用户输入，按前缀决定走哪个分支。"""
     # 一个会话用一个 thread_id；/clear 会替换它
@@ -677,7 +991,7 @@ def interactive_loop(app) -> int:
 
         # 斜杠命令：走 handle_command 分发
         if text.startswith("/"):
-            keep_going, thread_id = handle_command(text, thread_id=thread_id)
+            keep_going, thread_id = handle_command(text, thread_id=thread_id, app=app)
             if not keep_going:
                 return 0
             continue
@@ -744,8 +1058,12 @@ def main() -> int:
 
     # 保证退出时关闭 MCP 后台 loop，避免守护线程残留
     atexit.register(_mcp_shutdown)
+    # 关闭 SQLite 连接 —— atexit 是 LIFO，shutdown_persistence 会先于 _mcp_shutdown 调用，
+    # 两者无依赖关系，顺序无所谓。
+    atexit.register(shutdown_persistence)
 
-    # 仅导图模式：不需要构建主图，直接输出 Mermaid
+    # 仅导图模式：不需要构建主图，直接输出 Mermaid（draw_search_assistant_mermaid
+    # 内部走 InMemorySaver，不会触发 ~/.askanswer/state.db 创建）
     if args.graph is not None:
         return export_graph(args.graph)
 

@@ -1,6 +1,7 @@
 # 主图（父图）的拓扑：意图无关的三步骨架。
 #   START → understand → answer → sorcery → (END | answer 重试)
 # 真正的工具调用 / 多轮 react 在 answer 节点（react 子图）内部完成。
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -19,8 +20,14 @@ def route_from_sorcery(state: SearchState):
     return END
 
 
-def create_search_assistant():
-    """构建并编译主图，返回可直接 invoke / stream 的 LangGraph 应用。"""
+def create_search_assistant(checkpointer: BaseCheckpointSaver | None = None):
+    """构建并编译主图，返回可直接 invoke / stream 的 LangGraph 应用。
+
+    :param checkpointer: 显式注入的 checkpointer。
+        ``None`` 表示走默认持久化（``persistence.get_persistence().checkpointer``，
+        即 ``~/.askanswer/state.db`` 上的 SqliteSaver）。
+        想跳过持久化（如 ``--graph`` 导出 Mermaid、单测）时传 ``InMemorySaver()``。
+    """
     # 父图共享 SearchState，并把 ContextSchema 作为运行时上下文 schema
     workflow = StateGraph(SearchState, context_schema=ContextSchema)
     # react 子图作为 answer 节点嵌入；它没有自己的 checkpointer，便于 interrupt 透传
@@ -42,13 +49,20 @@ def create_search_assistant():
         {"answer": "answer", END: END},
     )
 
-    # 内存 checkpointer：用于在 HITL interrupt / 多轮对话中保留状态。生产环境可换持久化实现。
-    memory = InMemorySaver()
-    app = workflow.compile(checkpointer=memory)
-    return app
+    if checkpointer is None:
+        # 默认走持久化 SqliteSaver。延迟 import 避免 ``--graph`` 模式无意中
+        # 触发 SQLite 文件创建（draw_search_assistant_mermaid 显式传 InMemorySaver）。
+        from .persistence import get_persistence
+
+        checkpointer = get_persistence().checkpointer
+
+    return workflow.compile(checkpointer=checkpointer)
 
 
 def draw_search_assistant_mermaid() -> str:
-    """导出主图的 Mermaid 文本表示，供 `askanswer --graph` 使用。"""
-    app = create_search_assistant()
+    """导出主图的 Mermaid 文本表示，供 ``askanswer --graph`` 使用。
+
+    显式传 ``InMemorySaver`` 避免无谓地在 ``~/.askanswer/state.db`` 创建空 DB。
+    """
+    app = create_search_assistant(checkpointer=InMemorySaver())
     return app.get_graph().draw_mermaid()
