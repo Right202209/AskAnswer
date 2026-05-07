@@ -6,7 +6,7 @@
 
 * 普通工具调用走 ``langgraph.prebuilt.ToolNode``，由它统一处理并发执行、错误包装、
   以及 ``ToolRuntime`` 注入（这样 ``sql_query`` 等工具能拿到父图的 ``ContextSchema``）。
-* 注册时设置 ``requires_confirmation=True`` 的工具（目前只有 ``gen_shell_commands_run``）
+* 注册时设置 ``confirmation_class="shell"`` 的工具（目前只有 ``gen_shell_commands_run``）
   会先经过 ``_shell_plan_node`` 预先生成命令并写入 state，再由 ``_run_with_confirmation``
   通过 ``interrupt()`` 暂停图、把命令交给 CLI 让人类确认。
 """
@@ -21,8 +21,8 @@ from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
+from .intents import get_intent_registry
 from .load import model
-from .nodes import _local_intent
 from .registry import get_registry
 from .schema import ContextSchema
 from .state import SearchState
@@ -46,10 +46,10 @@ def _reclassify_intent(state: SearchState) -> str | None:
     # 工具调用回填的消息不是 HumanMessage，跳过避免在工具链中途切换 intent
     if not isinstance(last, HumanMessage):
         return None
-    fields = _local_intent(getattr(last, "content", "") or "")
+    fields = get_intent_registry().classify_local(getattr(last, "content", "") or "")
     if fields is None:
         return None
-    return fields["intent"]
+    return fields.intent
 
 
 def _answer_node(state: SearchState) -> dict:
@@ -57,27 +57,15 @@ def _answer_node(state: SearchState) -> dict:
     # 中途话题切换的兜底：用户突然从 chat 转到 sql 等，需要切换工具集
     new_intent = _reclassify_intent(state)
     intent = new_intent or state.get("intent", "search")
-    search_results = state.get("search_results", "")
+    handler = get_intent_registry().get(intent)
+    context_line = handler.prompt_hint(state)
+    retry_directive = dict(state.get("retry_directive") or {})
+    if retry_directive:
+        directive = retry_directive.get("instruction") or retry_directive
+        context_line = f"{context_line}\n\n上一次回答不够，请按以下指引重试：{directive}"
 
-    # 不同 intent 给 LLM 不同的“上下文提示”，引导它选择合适的工具或直接作答
-    if intent == "chat":
-        context_line = "（这是闲聊或常识类问题，不需要搜索结果；可直接回答或调用合适的工具。）"
-    elif intent == "sql":
-        context_line = "（这是数据库/SQL 类问题；如需查询数据，调用 sql_query 工具。）"
-    elif intent == "file_read":
-        file_path = state.get("file_path") or ""
-        if file_path:
-            context_line = f"（这是读文件请求，请调用 read_file 工具读取 `{file_path}` 后再作答。）"
-        else:
-            context_line = "（这是读文件请求，请调用 read_file 工具读取目标文件后再作答。）"
-    elif not search_results:
-        context_line = "（如需联网信息请调用 tavily_search 工具，否则基于已有知识回答。）"
-    else:
-        # 已经有搜索结果时，把结果直接塞入 prompt 让 LLM 整合作答
-        context_line = f"以下是搜索结果，可作为参考：\n{search_results}"
-
-    # 从注册表按 intent 取对应 bundle 的工具集合
-    bundle_tools = get_registry().list(bundle=intent)
+    # 从注册表按 handler 的 tag 集合取工具，新增 intent 不必改 registry 常量。
+    bundle_tools = get_registry().list(tags=handler.bundle_tags)
     tool_names = ", ".join(t.name for t in bundle_tools) or "(无)"
 
     system_prompt = (
@@ -97,6 +85,8 @@ def _answer_node(state: SearchState) -> dict:
     tool_calls = getattr(response, "tool_calls", None) or []
     if tool_calls:
         out: dict = {"step": "tool_called", "messages": [response]}
+        if retry_directive:
+            out["retry_directive"] = {}
         # 中途切换 intent 时，把新 intent 写回 state，下一轮 tool 选择就会变化
         if new_intent and new_intent != state.get("intent"):
             out["intent"] = new_intent
@@ -107,6 +97,8 @@ def _answer_node(state: SearchState) -> dict:
         "step": "completed",
         "messages": [response],
     }
+    if retry_directive:
+        out["retry_directive"] = {}
     if new_intent and new_intent != state.get("intent"):
         out["intent"] = new_intent
     return out
@@ -119,11 +111,12 @@ def _shell_plan_node(state: SearchState) -> dict:
     ``_tools_node`` 直接从 state 里读取已规划好的命令，避免重复调用 LLM
     （否则不仅多花 token，还可能生成不一样的命令导致用户白确认一次）。
     """
-    confirmation_names = get_registry().confirmation_names()
+    confirmation_classes = get_registry().confirmation_classes()
+    shell_names = {name for name, cls in confirmation_classes.items() if cls == "shell"}
     plans: dict = dict(state.get("pending_shell") or {})
     for tc in state["messages"][-1].tool_calls:
-        # 只处理需要人工确认的工具调用
-        if tc["name"] not in confirmation_names:
+        # 只处理 shell 类人工确认；其它确认类型不能复用 shell 规划器。
+        if tc["name"] not in shell_names:
             continue
         # 已经规划过就不重复生成（resume 后再次进入此节点时跳过）
         if tc["id"] in plans:
@@ -165,13 +158,19 @@ def _tools_node(
 ) -> dict:
     """工具调用执行节点：把普通工具与需要确认的工具分别派发。"""
     registry = get_registry()
-    confirmation_names = registry.confirmation_names()
+    confirmation_classes = registry.confirmation_classes()
+    shell_names = {name for name, cls in confirmation_classes.items() if cls == "shell"}
     last_msg = state["messages"][-1]
     tool_calls = list(getattr(last_msg, "tool_calls", None) or [])
 
     # 按是否需要 HITL 确认拆分
-    confirm_calls = [tc for tc in tool_calls if tc["name"] in confirmation_names]
-    plain_calls = [tc for tc in tool_calls if tc["name"] not in confirmation_names]
+    confirm_calls = [tc for tc in tool_calls if tc["name"] in shell_names]
+    unsupported_confirm_calls = [
+        tc
+        for tc in tool_calls
+        if tc["name"] in confirmation_classes and tc["name"] not in shell_names
+    ]
+    plain_calls = [tc for tc in tool_calls if tc["name"] not in confirmation_classes]
 
     out_messages: list[ToolMessage] = []
 
@@ -214,6 +213,18 @@ def _tools_node(
                 )
             )
 
+    for tc in unsupported_confirm_calls:
+        out_messages.append(
+            ToolMessage(
+                content=(
+                    f"工具 {tc['name']} 需要 {confirmation_classes[tc['name']]} 确认，"
+                    "但当前执行层尚未接入该确认类型。"
+                ),
+                tool_call_id=tc["id"],
+                name=tc["name"],
+            )
+        )
+
     # 需要确认的调用一条条走 HITL 流程（内部会 interrupt）
     for tc in confirm_calls:
         out_messages.append(_run_with_confirmation(tc, state))
@@ -226,10 +237,11 @@ def _route_from_answer(state: SearchState):
     """answer 节点之后的路由：是否要继续走工具，是否需要 HITL。"""
     if state["step"] != "tool_called":
         return END
-    confirmation_names = get_registry().confirmation_names()
+    confirmation_classes = get_registry().confirmation_classes()
+    shell_names = {name for name, cls in confirmation_classes.items() if cls == "shell"}
     tcs = getattr(state["messages"][-1], "tool_calls", None) or []
     # 只要有一条 tool_call 需要确认，就先去 shell_plan 把命令规划出来
-    if any(tc.get("name") in confirmation_names for tc in tcs):
+    if any(tc.get("name") in shell_names for tc in tcs):
         return "shell_plan"
     return "tools"
 

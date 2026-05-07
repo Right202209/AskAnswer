@@ -14,6 +14,7 @@ class SearchState(TypedDict):
     final_answer: str    # 最终给用户的答案
     retry_count: int     # 已经触发重新搜索的次数（仅 search 路径会自增）
     step: str            # 当前流转到的步骤标记，例如 understood / tool_called / completed / retry_search
-    intent: str          # 用户意图类别：file_read | search | chat | sql
+    intent: str          # 用户意图类别：file_read | search | chat | sql | math | 插件 intent
     file_path: str       # 当意图为 file_read 时，从用户输入提取出的目标文件路径
+    retry_directive: dict # sorcery 给下一轮 answer 的结构化重试指令，answer 消费后清空
     pending_shell: dict  # {tool_call_id: {command, explanation, instruction}}，HITL（人机确认）时跨 interrupt 持久化

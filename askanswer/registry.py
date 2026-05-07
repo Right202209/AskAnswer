@@ -1,8 +1,8 @@
 """统一工具注册表：内置工具、MCP 工具、SQL 工具的唯一真相源。
 
-每个工具会贴上一个或多个 ``bundles`` 标签（与 intent 一一对应），``answer`` 节点
-按当前 intent 取对应 bundle 内的工具绑定给 LLM。需要人工确认的工具（目前只有
-shell 工具）通过 ``requires_confirmation`` 标记，react 子图会把它们路由到
+每个工具会贴上一个或多个 ``tags`` 标签（intent 名也是 tag），``answer`` 节点
+按当前 handler 的 tag 集合取工具绑定给 LLM。需要人工确认的工具（目前只有
+shell 工具）通过 ``confirmation_class`` 标记，react 子图会把它们路由到
 ``shell_plan`` HITL 流程，而非走普通 ``ToolNode`` 直接执行。
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, create_model
@@ -22,32 +22,46 @@ from .mcp import get_manager as _mcp_manager
 _LOG = logging.getLogger(__name__)
 
 
-# Bundle 名称常量 —— 与 nodes.py 里 intent 标签保持一致。
-BUNDLE_CHAT = "chat"
-BUNDLE_SEARCH = "search"
-BUNDLE_FILE = "file_read"
-BUNDLE_SQL = "sql"
-ALL_BUNDLES = frozenset({BUNDLE_CHAT, BUNDLE_SEARCH, BUNDLE_FILE, BUNDLE_SQL})
+# Intent tag 常量。保留 BUNDLE_* 别名，兼容旧调用方。
+TAG_CHAT = BUNDLE_CHAT = "chat"
+TAG_SEARCH = BUNDLE_SEARCH = "search"
+TAG_FILE = BUNDLE_FILE = "file_read"
+TAG_SQL = BUNDLE_SQL = "sql"
+TAG_MATH = "math"
+ALL_INTENT_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, TAG_SQL, TAG_MATH})
+ALL_BUNDLES = ALL_INTENT_TAGS
 
-# 内置工具默认在所有 bundle 中可用，方便 react 循环跨 intent 串工具
+# 内置工具默认在所有 intent tag 中可用，方便 react 循环跨 intent 串工具
 # （例如 SQL 模式下也能读 CSV、chat 模式下也能联网搜索）。
-_BUILTIN_BUNDLES = ALL_BUNDLES
-# Shell 工具刻意从 sql bundle 中剔除，让 SQL 流程更聚焦、避免误调用 shell。
-_SHELL_BUNDLES = frozenset({BUNDLE_CHAT, BUNDLE_SEARCH, BUNDLE_FILE})
-# MCP 工具来自用户安装的外部服务，统一对所有 bundle 开放。
-_MCP_BUNDLES = ALL_BUNDLES
+_BUILTIN_TAGS = ALL_INTENT_TAGS | frozenset({"builtin", "io_bound"})
+# Shell 工具刻意从 sql tag 中剔除，让 SQL 流程更聚焦、避免误调用 shell。
+_SHELL_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, "shell"})
+# MCP 工具来自用户安装的外部服务，统一对所有 intent tag 开放。
+_MCP_TAGS = ALL_INTENT_TAGS | frozenset({"mcp", "external_api"})
+
+ConfirmationClass = Literal["none", "shell", "fs_write", "external_api_paid"]
 
 
 @dataclass(frozen=True)
 class ToolDescriptor:
     # 真正的工具对象（langchain BaseTool）
     tool: BaseTool
-    # 该工具暴露给哪些 bundle/意图
-    bundles: frozenset[str]
+    # 该工具暴露给哪些 tag；intent 名也作为 tag 使用
+    tags: frozenset[str]
     # 来源标签，便于按前缀批量摘除（如 "mcp:" 重连时清掉旧的）
     source: str                       # "builtin" | "shell" | "sql" | "mcp:<server>"
-    # 是否需要人工确认；当前仅 shell 工具为 True
-    requires_confirmation: bool = False
+    # 需要哪类人工确认；当前仅 shell 类接入 HITL 执行体
+    confirmation_class: ConfirmationClass = "none"
+
+    @property
+    def bundles(self) -> frozenset[str]:
+        """Compatibility alias for older code that still says bundle."""
+        return self.tags
+
+    @property
+    def requires_confirmation(self) -> bool:
+        """Compatibility alias for older callers."""
+        return self.confirmation_class != "none"
 
 
 class ToolRegistry:
@@ -72,13 +86,21 @@ class ToolRegistry:
         with self._lock:
             return self._tools.get(name)
 
-    def list(self, bundle: str | None = None) -> list[BaseTool]:
-        """列出所有工具；指定 bundle 时只返回该 bundle 内的工具。"""
+    def list(
+        self,
+        bundle: str | None = None,
+        *,
+        tags: set[str] | frozenset[str] | None = None,
+    ) -> list[BaseTool]:
+        """列出所有工具；指定 tags/bundle 时只返回命中任一 tag 的工具。"""
         with self._lock:
             descriptors = list(self._tools.values())
-        if bundle is None:
+        if tags is None and bundle is not None:
+            tags = frozenset({bundle})
+        if tags is None:
             return [d.tool for d in descriptors]
-        return [d.tool for d in descriptors if bundle in d.bundles]
+        wanted = frozenset(tags)
+        return [d.tool for d in descriptors if d.tags & wanted]
 
     def names(self, bundle: str | None = None) -> set[str]:
         return {t.name for t in self.list(bundle)}
@@ -86,7 +108,16 @@ class ToolRegistry:
     def confirmation_names(self) -> set[str]:
         """返回所有标记为“需要确认”的工具名集合，供 react 子图路由判断。"""
         with self._lock:
-            return {n for n, d in self._tools.items() if d.requires_confirmation}
+            return {n for n, d in self._tools.items() if d.confirmation_class != "none"}
+
+    def confirmation_classes(self) -> dict[str, str]:
+        """返回 tool name -> confirmation class。当前执行层只实现 shell。"""
+        with self._lock:
+            return {
+                n: d.confirmation_class
+                for n, d in self._tools.items()
+                if d.confirmation_class != "none"
+            }
 
     def refresh_mcp(self) -> None:
         """从 MCP 管理器实时同步工具，重建注册表中 mcp 那一片。
@@ -109,7 +140,7 @@ class ToolRegistry:
             self.register(
                 ToolDescriptor(
                     tool=wrapped,
-                    bundles=_MCP_BUNDLES,
+                    tags=_MCP_TAGS,
                     source=f"mcp:{spec.get('server', 'unknown')}",
                 )
             )
@@ -162,16 +193,16 @@ def _seed_builtin(registry: ToolRegistry) -> None:
     )
     for tool in plain_tools:
         registry.register(
-            ToolDescriptor(tool=tool, bundles=_BUILTIN_BUNDLES, source="builtin")
+            ToolDescriptor(tool=tool, tags=_BUILTIN_TAGS, source="builtin")
         )
 
     # Shell 工具特殊：bundle 不含 sql + 需要人工确认
     registry.register(
         ToolDescriptor(
             tool=gen_shell_commands_run,
-            bundles=_SHELL_BUNDLES,
+            tags=_SHELL_TAGS,
             source="shell",
-            requires_confirmation=True,
+            confirmation_class="shell",
         )
     )
 
@@ -191,7 +222,7 @@ def _seed_sql(registry: ToolRegistry) -> None:
     registry.register(
         ToolDescriptor(
             tool=sql_query,
-            bundles=frozenset({BUNDLE_CHAT, BUNDLE_SQL}),
+            tags=frozenset({TAG_CHAT, TAG_SQL, "sql_tool"}),
             source="sql",
         )
     )

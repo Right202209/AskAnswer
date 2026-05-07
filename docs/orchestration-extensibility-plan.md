@@ -207,3 +207,41 @@ class IntentHandler(Protocol):
 6. **MCP 重连**：`/mcp <url>` → `/mcp tools` 列出新工具 → 提一条用得上的问题，确认 LLM 能调用
 
 仅当所有冒烟通过、Mermaid 可解释、阶段 7 新 intent 接入成功，才视为重构完成。
+
+---
+
+## 可行性评估（2026-05-06 review）
+
+### ✅ 站得住的部分
+- **行号引用全部对齐**：`nodes.py:14-122/275-294/336-399`、`_react_internals.py:32-52/62-77`、`registry.py:26-50`、`cli.py:322-371`、`state.py` 字段都已核对，与现实一致。
+- **`with_structured_output` 替换手写 JSON 解析**：`load.py` 是 `init_chat_model` 代理，OpenAI/Anthropic 都原生支持，零阻碍。
+- **`bundles → tags` 重命名**：`registry.list(bundle=...)` 只在 `_react_internals.py:80` 一处使用，迁移面小、可保留 `bundle` 关键字别名向后兼容。
+- **`retry_directive` 走 TypedDict**：`SearchState` 加可选字段对 SqliteSaver 透明。
+- **react 子图改名**为 `tool_loop_subgraph`：纯重命名，零风险。
+
+### ⚠️ 三处必须先解决的设计冲突
+
+**1. `IntentName = Literal[...]`（阶段 1）与"插件化注册新 intent"（阶段 2、7）冲突**
+Literal 是闭合的，运行时无法扩展。新 `MathHandler` 一加，`state["intent"]` 静态类型立即不合法。要么：
+- 退回 `intent: str` + handler.name 校验（放弃 P0 Literal），或
+- 维持 Literal 但接受"插件 intent 类型上不安全"。
+计划需声明取舍。
+
+**2. `local_classify` 第一个非 None 胜出 vs 现有优先级语义**
+当前 `_local_intent`（`nodes.py:144-178`）有强排序：file_path+动作词 > SQL 关键词/正则 > 搜索关键词 > chat 起手词，且 fallback 路径里"长文本无问号 → search"是**跨 intent 的全局启发**。拆到各 handler 的话：
+- 注册顺序就是分类优先级，新加 intent 易踩坑；
+- 全局 fallback（长度阈值、空文本）无主，应该放在 registry 协调层、不属于任何单个 handler。
+计划只说"按注册顺序遍历"，未说优先级如何固定。
+
+**3. `chat` handler 也接 sorcery 评估（阶段 3）但 `max_retries=0`**
+阶段 5 又提让 chat/file_read"走 tool_loop_no_eval 分支跳过 sorcery"。两者重复——`max_retries=0` 已经能 always-pass，多搞一条入口边纯粹给 `graph.py` 加复杂度。**建议砍掉阶段 5 的条件入口边**，保持单一入口。
+
+### 🔸 次要提示
+- `_normalize_intent` 用 `model_post_init` 不太合适（pydantic 签名约束），改 `@model_validator(mode="after")` 更顺。
+- `IntentHandler.cli_label(update: dict)` 把 UI 文案塞进 `intents/` 包，跨层耦合可接受但要意识到。
+- 阶段 7 用 `MathHandler` 做冒烟较弱：`calculate` 工具已在所有 bundle，chat handler 直接覆盖；建议换成"加 `code_analysis` intent，挂 `read_file + tavily_search` 两个 tag"才能真正证明 tag 系统起作用。
+- 没有测试套件，6 阶段连改 7 文件，回归靠手测——建议在阶段 1 之前先把 `验证` 一节的 6 条冒烟脚本化（一个 `make smoke` 脚本调 4 条 `askanswer` 命令断言关键词），再开干。
+
+### 推荐顺序微调
+阶段 1 → 阶段 4（tag 改名，独立可验证）→ 阶段 2/3（handler 抽取，最大改动一次到位）→ 阶段 6（CLI）→ 阶段 7（冒烟）。砍掉阶段 5 的条件入口边。
+

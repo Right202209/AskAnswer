@@ -23,6 +23,7 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 
 from .graph import create_search_assistant, draw_search_assistant_mermaid
+from .intents import get_intent_registry
 from .load import current_model_label, model, set_model
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
 from .persistence import (
@@ -322,16 +323,7 @@ def stream_query(
 def _render_node_update(node: str, update: dict, final_answer: str) -> str:
     """根据节点名渲染对应的进度标记，并把 final_answer 顺手记下来。"""
     if node == "understand":
-        # 渲染 intent 与对应的关键信息（搜索词 / 文件路径）
-        intent = update.get("intent", "")
-        if intent == "file_read":
-            detail = f"file_read: {_truncate(update.get('file_path', ''))}"
-        elif intent == "sql":
-            detail = "sql"
-        elif intent == "chat":
-            detail = "chat"
-        else:
-            detail = f"search: {_truncate(update.get('search_query', ''))}"
+        detail = _truncate(_intent_cli_label(update))
         print(_marker("Understand", detail))
     elif node == "file_read":
         # （兼容老拓扑）file_read 节点已合并到 react 的 read_file 工具
@@ -355,7 +347,8 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
         if update.get("final_answer"):
             final_answer = update["final_answer"]
         if update.get("step") == "retry_search":
-            nsq = _truncate(update.get("search_query", ""))
+            directive = update.get("retry_directive") or {}
+            nsq = _truncate(update.get("search_query", "") or directive.get("instruction", ""))
             print(_marker("Sorcery", f"不够好，重搜：{nsq}"))
         else:
             print(_marker("Sorcery", "通过"))
@@ -369,6 +362,10 @@ def _render_node_update(node: str, update: dict, final_answer: str) -> str:
         # 兜底：未知节点也给一行标记，至少能看到流转
         print(_marker(node))
     return final_answer
+
+
+def _intent_cli_label(update: dict) -> str:
+    return get_intent_registry().get(update.get("intent")).cli_label(update)
 
 
 def _extract_interrupt_value(update):
