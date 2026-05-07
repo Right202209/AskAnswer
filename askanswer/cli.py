@@ -34,6 +34,7 @@ from .persistence import (
 from .registry import get_registry
 from .schema import ContextSchema
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
+from .ui_select import CANCELLED, select_option
 
 
 # rich 控制台：仅用于把最终答案以 Markdown 形式渲染
@@ -393,40 +394,28 @@ def _pending_interrupt(app, config):
 
 
 def _prompt_shell_confirmation(payload) -> dict:
-    """用文本 UI 提示用户确认 shell 命令；支持 y/n/e（编辑后再生成）。"""
+    """用上下选项菜单提示用户确认 shell 命令；选项含 执行 / 取消 / 补充说明后重新生成。"""
     data = payload if isinstance(payload, dict) else {}
     command = data.get("command") or str(payload)
     explanation = data.get("explanation") or ""
     instruction = data.get("instruction") or ""
 
-    # 循环：用户选 e 编辑指令时，重新生成命令并再次询问
+    # 循环：用户选 “补充说明后重新生成” 时，重新生成命令并再次询问
     while True:
         print()
         print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}需要确认 Shell 命令{C.RESET}")
         print(f"    {C.DIM}命令：{C.RESET}{C.CYAN}{command}{C.RESET}")
         if explanation:
             print(f"    {C.DIM}说明：{C.RESET}{explanation}")
-        print(
-            f"    {C.DIM}选项：{C.RESET}"
-            f"{C.GREEN}y{C.RESET}=执行  "
-            f"{C.RED}n{C.RESET}=取消  "
-            f"{C.GOLD}e{C.RESET}=补充说明后重新生成"
+        # 默认光标停在“取消”：避免误回车直接执行高风险命令。
+        idx, _ = select_option(
+            ["执行", "取消", "补充说明后重新生成"],
+            prompt="选择操作（↑/↓ 导航 · Enter 确认）：",
+            default=1,
         )
-        try:
-            reply = input(f"    {C.ORANGE}你的选择 (y/N/e):{C.RESET} ").strip().lower()
-        except EOFError:
-            # Ctrl-D：等价于取消
-            reply = ""
-        except KeyboardInterrupt:
-            # Ctrl-C：等价于取消
-            reply = ""
-            print()
-
-        if reply in ("y", "yes"):
-            # 批准：让节点真正执行命令
+        if idx == 0:
             return {"approve": True, "command": command, "explanation": explanation}
-        if reply in ("e", "edit", "more", "add"):
-            # 让用户输入补充说明，再让 LLM 重新生成命令
+        if idx == 2:
             more = _read_more_prompt()
             if not more:
                 print(f"    {C.DIM}未输入补充说明，保持原命令。{C.RESET}")
@@ -447,7 +436,7 @@ def _prompt_shell_confirmation(payload) -> dict:
             explanation = new_explanation
             instruction = combined
             continue
-        # 其它输入（包括 n/no/空）一律视为取消
+        # idx == 1（取消）或 CANCELLED（Esc/Ctrl-C）一律视为不执行
         return {"approve": False, "command": command, "explanation": explanation}
 
 

@@ -1,6 +1,14 @@
-"""Helix intent handler：触发规格优先演化循环工具。"""
+"""Helix intent handler：触发规格优先演化循环工具。
+
+触发口径：
+1. 关键字（``helix`` / ``苏格拉底`` / ``需求澄清`` / ``spec-first`` …）—— 老逻辑；
+2. 模糊需求启发式 —— 含有 “做一个 / 搞个 / build a …” 这类模糊动词，但没有具体
+   实体（路径 / SQL / 数学），这种典型的 “想做点什么但还没想清楚” 也走 Helix。
+"""
 
 from __future__ import annotations
+
+import re
 
 from ..state import SearchState
 from .base import EvaluationResult, IntentClassification, pass_result
@@ -36,6 +44,70 @@ HELIX_KEYWORDS_CN = (
     "acceptance",
 )
 
+# 模糊动词：用户说 “想做一个 X / 搞个 Y” 但 X / Y 描述不具体，多半需要先澄清。
+AMBIGUITY_VERBS_CN = (
+    "做一个",
+    "做个",
+    "搞一个",
+    "搞个",
+    "弄一个",
+    "弄个",
+    "写一个",
+    "写个",
+    "开发一个",
+    "开发个",
+    "想做",
+    "想搞",
+    "想写",
+    "帮我做",
+    "帮我搞",
+    "帮我写",
+    "帮我开发",
+)
+AMBIGUITY_VERBS_EN = (
+    "build a ",
+    "build an ",
+    "make a ",
+    "make an ",
+    "design a ",
+    "design an ",
+    "create a ",
+    "create an ",
+    "develop a ",
+    "develop an ",
+    "i want to build",
+    "help me build",
+)
+
+# 当文本含 “模糊动词” 但同时命中下面这些“具体性标记”时，就不再认定为模糊需求 ——
+# 让 sql / file_read / math / search 这些更精准的 handler 兜走。
+SPECIFICITY_MARKERS = re.compile(
+    r"""(?ix)
+    \b(?:select|insert|update|delete|from|where|join)\b   # SQL 关键字
+    | https?://                                            # URL
+    | [./~][\w\-./]*\.(?:py|md|json|yaml|yml|csv|tsv|txt)  # 文件路径
+    | [\d.]+\s*[\+\-\*/%]\s*[\d.]+                         # 算式
+    """,
+)
+
+
+def _looks_ambiguous(text: str) -> bool:
+    """启发式判断：是否一段“想做点什么但描述不具体”的需求。"""
+    clean = text.strip()
+    if not clean or len(clean) > 200:
+        # 太长通常意味着已经包含了足够细节，不需要 Helix 来澄清。
+        return False
+    lowered = clean.lower()
+    has_vague = any(v in clean for v in AMBIGUITY_VERBS_CN) or any(
+        v in lowered for v in AMBIGUITY_VERBS_EN
+    )
+    if not has_vague:
+        return False
+    if SPECIFICITY_MARKERS.search(clean):
+        # 含具体的 SQL / URL / 路径 / 算式：让更精准的 handler 处理。
+        return False
+    return True
+
 
 class HelixHandler:
     name = "helix"
@@ -54,6 +126,9 @@ class HelixHandler:
         if any(keyword in lowered for keyword in HELIX_KEYWORDS_LOWER):
             return IntentClassification(intent=self.name, understanding=clean)
         if any(keyword in clean for keyword in HELIX_KEYWORDS_CN):
+            return IntentClassification(intent=self.name, understanding=clean)
+        # 关键字没命中时再看是不是“模糊需求” —— 这是新增的“需求不明确即切换”逻辑。
+        if _looks_ambiguous(clean):
             return IntentClassification(intent=self.name, understanding=clean)
         return None
 

@@ -38,6 +38,9 @@ def _intent_from_llm(user_message: str) -> dict:
         "如 /tmp/a.txt、./data.csv、report.md）\n"
         "- sql：要求查询数据库、编写 SQL、分析表结构、统计数据库数据\n"
         "- math：明确要求数学表达式计算\n"
+        "- helix：用户给出的需求模糊、不具体（“想做一个 X”但 X 缺乏关键约束、"
+        "受众、验收标准），需要先苏格拉底式澄清再动手；包含 spec-first / "
+        "需求澄清 / 苏格拉底等关键字时也属于此类\n"
         "- chat：闲聊、常识性问题，或你已知可直接回答、不需要联网\n"
         "- search：需要联网搜索获取实时、最新或不确定的信息\n\n"
         f"intent 必须是这些值之一：{intent_list}。\n"
@@ -73,6 +76,8 @@ def understand_query_node(state: SearchState) -> dict:
         hint = "识别为数据库/SQL 问题，转交 sql_query 工具"
     elif intent == "math":
         hint = "识别为数学计算问题，转交 calculate 工具"
+    elif intent == "helix":
+        hint = "需求不够明确，进入 Helix 苏格拉底澄清流程"
     elif intent == "chat":
         hint = "识别为闲聊/常识问题，直接回答"
     else:
