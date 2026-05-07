@@ -28,7 +28,8 @@ TAG_SEARCH = BUNDLE_SEARCH = "search"
 TAG_FILE = BUNDLE_FILE = "file_read"
 TAG_SQL = BUNDLE_SQL = "sql"
 TAG_MATH = "math"
-ALL_INTENT_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, TAG_SQL, TAG_MATH})
+TAG_HELIX = "helix"
+ALL_INTENT_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, TAG_SQL, TAG_MATH, TAG_HELIX})
 ALL_BUNDLES = ALL_INTENT_TAGS
 
 # 内置工具默认在所有 intent tag 中可用，方便 react 循环跨 intent 串工具
@@ -152,13 +153,14 @@ _registry_lock = Lock()
 
 
 def get_registry() -> ToolRegistry:
-    """获取进程级注册表；首次调用时按需 seed 内置 + SQL + MCP 工具。"""
+    """获取进程级注册表；首次调用时按需 seed 内置 + SQL + Helix + MCP 工具。"""
     global _registry
     with _registry_lock:
         if _registry is None:
             r = ToolRegistry()
             _seed_builtin(r)
             _seed_sql(r)
+            _seed_helix(r)
             r.refresh_mcp()
             _registry = r
         return _registry
@@ -224,6 +226,25 @@ def _seed_sql(registry: ToolRegistry) -> None:
             tool=sql_query,
             tags=frozenset({TAG_CHAT, TAG_SQL, "sql_tool"}),
             source="sql",
+        )
+    )
+
+
+def _seed_helix(registry: ToolRegistry) -> None:
+    """注册 Helix 规格演化工具；模块缺失时跳过，不影响其他工具。"""
+    try:
+        from .helix.helix_tool import helix_spec_loop
+    except ImportError as exc:
+        import sys
+        print(f"[askanswer] helix_spec_loop 工具加载失败: {exc}", file=sys.stderr)
+        _LOG.warning("helix_spec_loop tool unavailable: %s", exc)
+        return
+    # 仅暴露给 chat / helix bundle：避免 search / sql / file_read 等流程下被误调用。
+    registry.register(
+        ToolDescriptor(
+            tool=helix_spec_loop,
+            tags=frozenset({TAG_CHAT, TAG_HELIX, "helix_tool"}),
+            source="helix",
         )
     )
 
