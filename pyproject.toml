@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv",
     "rich",
     "markitdown",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.scripts]

@@ -1,8 +1,10 @@
 # 命令行入口与交互式 REPL。
 # 设计要点：
 # - 用 ANSI 转义自绘“面板/边框”样式，无第三方 TUI 依赖；
-# - app.stream(stream_mode="updates") 拿到的每个节点更新都渲染成一行进度标记；
+# - app.stream(stream_mode=["updates","messages"]) 同时拿“节点完成事件”
+#   和“LLM token 流”，前者打 ⏺ 标记 + 耗时，后者用 rich.live 实时渲染答案；
 # - HITL（人机确认）场景下监听 __interrupt__，从 CLI 拿用户输入并 Command(resume=...) 续跑；
+# - 输入栏走 prompt_toolkit：历史回溯 / 斜杠补全 / 反斜杠续行 / bottom_toolbar 状态栏；
 # - 斜杠命令（/help、/clear、/status、/model、/mcp、/exit）由 handle_command 路由；
 # - `!<cmd>` 前缀绕开 LangGraph 直接 shell 执行（带危险检查）。
 from __future__ import annotations
@@ -12,13 +14,15 @@ import atexit
 import os
 import re
 import sys
+import time
 import unicodedata
 import uuid
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langgraph.types import Command
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.padding import Padding
 
@@ -34,7 +38,9 @@ from .persistence import (
 from .registry import get_registry
 from .schema import ContextSchema
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
+from .ui_input import SLASH_COMMANDS, cmd_meta, make_session, read_line
 from .ui_select import CANCELLED, select_option
+from .ui_spinner import Spinner
 
 
 # rich 控制台：仅用于把最终答案以 Markdown 形式渲染
@@ -147,22 +153,55 @@ def tips_block() -> None:
     print()
 
 
-def help_block() -> None:
-    """/help 输出的命令清单。"""
+def help_block(target: str | None = None) -> None:
+    """``/help`` 输出命令清单；``/help <cmd>`` 输出单条命令的详细用法。"""
+    if target:
+        # 容错：``/help help`` 与 ``/help /help`` 都能命中
+        key = target if target.startswith("/") else f"/{target}"
+        meta = cmd_meta(key)
+        print()
+        if meta is None:
+            print(f"  {C.RED}未知命令：{C.RESET}{key}  "
+                  f"({C.CYAN}/help{C.RESET} 看全部)")
+            print()
+            return
+        desc, usage = meta
+        print(f"  {C.BOLD}{key}{C.RESET}  {C.DIM}{desc}{C.RESET}")
+        print(f"   {C.DIM}用法：{C.RESET}{C.CYAN}{usage}{C.RESET}")
+        # 几条特例，给一个具体范例 —— 减少“看不懂格式”的回头问
+        examples = _help_examples(key)
+        if examples:
+            print(f"   {C.DIM}示例：{C.RESET}")
+            for ex in examples:
+                print(f"     {C.DIM}·{C.RESET} {C.CYAN}{ex}{C.RESET}")
+        print()
+        return
+
+    # 全清单：直接读 SLASH_COMMANDS（与补全菜单单一真源）
     print()
-    print(f" {C.BOLD}Commands{C.RESET}")
-    print(f"   {C.CYAN}/help{C.RESET}     显示此帮助")
-    print(f"   {C.CYAN}/clear{C.RESET}    清屏并开始新会话（旧会话保留，可 /threads 找回）")
-    print(f"   {C.CYAN}/status{C.RESET}   查看当前会话信息")
-    print(f"   {C.CYAN}/model{C.RESET}    查看或切换模型 ({C.DIM}/model <provider:name>{C.RESET})")
-    print(f"   {C.CYAN}/mcp{C.RESET}      管理 MCP 服务 ({C.DIM}/mcp 查看子命令{C.RESET})")
-    print(f"   {C.CYAN}/threads{C.RESET}  列出历史会话 ({C.DIM}/threads [关键词]{C.RESET})")
-    print(f"   {C.CYAN}/resume{C.RESET}   恢复指定会话 ({C.DIM}/resume <序号|id 前缀>{C.RESET})")
-    print(f"   {C.CYAN}/title{C.RESET}    给当前会话命名 ({C.DIM}/title <名字>{C.RESET})")
-    print(f"   {C.CYAN}/delete{C.RESET}   删除会话 ({C.DIM}/delete <序号|id 前缀>{C.RESET})")
-    print(f"   {C.CYAN}/exit{C.RESET}     退出 (也可 /quit, /q, Ctrl-D)")
+    print(f" {C.BOLD}Commands{C.RESET}  "
+          f"{C.DIM}(/<Tab> 自动补全 · /help <cmd> 查看详细){C.RESET}")
+    for name, desc, _usage in SLASH_COMMANDS:
+        print(f"   {C.CYAN}{name:<9}{C.RESET} {desc}")
     print(f"   {C.CYAN}!<cmd>{C.RESET}    直接执行 shell 命令 (如 !ls -la)")
     print()
+    print(f" {C.DIM}快捷键：↑/↓ 历史 · Ctrl-R 反向搜索 · "
+          f"行尾 \\ 多行续行 · Ctrl-C 取消（连按二次退出）{C.RESET}")
+    print()
+
+
+def _help_examples(cmd: str) -> list[str]:
+    """单条命令的 hands-on 示例，方便用户照抄。"""
+    table = {
+        "/model":   ["/model gpt-4o-mini", "/model anthropic:claude-3-5-sonnet"],
+        "/mcp":     ["/mcp https://example.com/mcp my-server",
+                     "/mcp tools my-server", "/mcp remove my-server"],
+        "/threads": ["/threads", "/threads sql 关键词"],
+        "/resume":  ["/resume 1", "/resume 1e14b9b"],
+        "/title":   ["/title 周三的 SQL 调试"],
+        "/delete":  ["/delete 1", "/delete 1e14b9b"],
+    }
+    return table.get(cmd, [])
 
 
 def mcp_help_block() -> None:
@@ -209,12 +248,31 @@ def status_block(thread_id: str) -> None:
 
 # ── Streaming progress ────────────────────────────────────────────
 
-def _marker(title: str, detail: str = "") -> str:
-    """生成一行节点进度标记：⏺ Title(detail)。"""
+def _marker(title: str, detail: str = "", elapsed: float | None = None) -> str:
+    """生成一行节点进度标记：⏺ Title(detail)  (1.2s)。"""
     body = f"{C.BOLD}{title}{C.RESET}"
     if detail:
         body += f"{C.DIM}({detail}){C.RESET}"
+    if elapsed is not None and elapsed >= 0.05:
+        # ≥50ms 才打耗时，纯条件判断节点（瞬时）就不显示了
+        body += f"  {C.DIM}({elapsed:.1f}s){C.RESET}"
     return f"  {C.ORANGE}⏺{C.RESET} {body}"
+
+
+# 节点 → spinner 显示文案的映射；未列出的节点用兜底文案。
+_PHASE_TEXT = {
+    "understand":  "理解意图…",
+    "answer":      "思考中…",
+    "tools":       "执行工具…",
+    "shell_plan":  "规划 shell 命令…",
+    "search":      "联网搜索…",
+    "file_read":   "读取文件…",
+    "sorcery":     "评估答案质量…",
+}
+
+
+def _phase_text(node: str) -> str:
+    return _PHASE_TEXT.get(node, "思考中…")
 
 
 def _truncate(s: str, limit: int = 60) -> str:
@@ -246,44 +304,65 @@ def stream_query(
     thread_id: str,
     runtime_context: ContextSchema | None = None,
 ) -> str:
-    """跑一次完整的图调用，期间逐节点渲染进度，并处理 HITL interrupt。"""
+    """跑一次完整的图调用：spinner 提示等待 + 实时流式渲染答案 + 处理 HITL。"""
     final_answer = ""
-    # 同一个 thread_id 表示同一段会话，复用 checkpointer 的状态
     config = {"configurable": {"thread_id": thread_id}}
     context = runtime_context or _runtime_context()
-    # 第一次进入图：把用户消息塞进 messages；resume 后会被替换成 Command(...)
     graph_input: object = {"messages": [HumanMessage(content=query)]}
 
     print()
-    while True:
-        interrupt_payload = None
-        # stream_mode="updates"：每个节点产生增量时回调；__interrupt__ 是特殊通道
-        for chunk in app.stream(
-            graph_input,
-            config=config,
-            context=context,
-            stream_mode="updates",
-        ):
-            for node, update in chunk.items():
-                if node == "__interrupt__":
-                    # 节点抛出 interrupt() 时 LangGraph 通过这个伪 node 通知我们
-                    interrupt_payload = _extract_interrupt_value(update)
+    spinner = Spinner("理解意图…")
+    spinner.start()
+    # 节点之间的耗时：每次收到 update 时算一次差，再把秒表归零。
+    last_finish = time.monotonic()
+
+    # rich.Live 在 answer 节点的 LLM token 流到达时启动，承担实时渲染。
+    # streamed 标记用来告诉调用者“最终答案已经在屏上了，不要再 render_answer 一次”。
+    live_state = {"live": None, "buf": "", "in_tool": False, "streamed": False}
+
+    try:
+        while True:
+            interrupt_payload = None
+            for chunk_mode, payload in app.stream(
+                graph_input,
+                config=config,
+                context=context,
+                stream_mode=["updates", "messages"],
+            ):
+                if chunk_mode == "messages":
+                    _handle_message_chunk(payload, spinner, live_state)
                     continue
-                if not isinstance(update, dict):
-                    continue
-                final_answer = _render_node_update(node, update, final_answer)
 
-        # 有些 langgraph 版本不会通过 updates 通道暴露 __interrupt__，
-        # 流结束后再从 state 探一遍挂起任务上的 interrupt，作为兜底。
-        if interrupt_payload is None:
-            interrupt_payload = _pending_interrupt(app, config)
+                # chunk_mode == "updates"
+                for node, update in (payload or {}).items():
+                    if node == "__interrupt__":
+                        interrupt_payload = _extract_interrupt_value(update)
+                        continue
+                    if not isinstance(update, dict):
+                        continue
+                    elapsed = time.monotonic() - last_finish
+                    last_finish = time.monotonic()
+                    final_answer = _on_node_update(
+                        node, update, elapsed, final_answer, spinner, live_state,
+                    )
 
-        if interrupt_payload is None:
-            break
+            # 兜底：流结束后还可能挂着 interrupt（部分 langgraph 版本不走 __interrupt__）
+            if interrupt_payload is None:
+                interrupt_payload = _pending_interrupt(app, config)
+            if interrupt_payload is None:
+                break
 
-        # 拿到中断后弹出确认 UI；用户的回应作为 Command(resume=...) 喂回去继续跑
-        resume_value = _prompt_shell_confirmation(interrupt_payload)
-        graph_input = Command(resume=resume_value)
+            # HITL：暂停 spinner 让用户看清楚要确认的命令；resume 后再启动新一轮。
+            spinner.stop()
+            _close_live(live_state)
+            resume_value = _prompt_shell_confirmation(interrupt_payload)
+            graph_input = Command(resume=resume_value)
+            spinner = Spinner("继续执行…")
+            spinner.start()
+            last_finish = time.monotonic()
+    finally:
+        _close_live(live_state)
+        spinner.stop()
 
     # 兜底：若节点流里没拿到 final_answer，从 state 里找最后一条消息内容
     if not final_answer:
@@ -299,6 +378,13 @@ def stream_query(
                         final_answer = content
         except Exception:
             pass
+
+    # Live 已经把答案画在屏上了，就只补一个空行做间距；
+    # 没走 Live 的（典型场景：模型不支持 stream，或 sorcery 重写答案）才走传统渲染。
+    if live_state.get("streamed"):
+        print()
+    else:
+        render_answer(final_answer or "未生成答案。")
 
     # 持久化线程元数据：每次问答后写一行（首次写入会自动取 preview 前 30 字符做 title）。
     # 失败不影响主流程 —— 用户拿到回答比记账更重要。
@@ -321,47 +407,154 @@ def stream_query(
     return final_answer or "未生成答案。"
 
 
-def _render_node_update(node: str, update: dict, final_answer: str) -> str:
+def _handle_message_chunk(payload, spinner: Spinner, live_state: dict) -> None:
+    """处理 stream_mode='messages' 通道的 token 增量。
+
+    策略：
+    - 只关心 ``AIMessageChunk`` —— ToolMessage / HumanMessage 直接忽略；
+    - 看到 ``tool_call_chunks``（LLM 正在生成工具调用）时把 ``in_tool`` 置位，
+      下一次出现 user-facing content 时清空 buffer，让“工具路由阶段的胡言乱语”
+      不污染最终答案的渲染；
+    - 首次 user-facing content 出现时切到 rich.Live：spinner 让位、Markdown 实时刷新。
+    """
+    if not isinstance(payload, tuple) or len(payload) != 2:
+        return
+    msg, _meta = payload
+    if not isinstance(msg, AIMessageChunk):
+        return
+
+    # tool_call_chunks 出现 = LLM 正在“规划工具调用”。Mark phase；下一段 content 来时重置 buffer。
+    if getattr(msg, "tool_call_chunks", None):
+        live_state["in_tool"] = True
+        return
+
+    content = msg.content if isinstance(msg.content, str) else ""
+    if not content:
+        return
+
+    if live_state["in_tool"]:
+        live_state["buf"] = ""
+        live_state["in_tool"] = False
+
+    if live_state["live"] is None:
+        # 第一次拿到 user-facing token：让 spinner 让位，启动 Live 渲染
+        spinner.stop()
+        live = Live(
+            Padding(Markdown(""), (0, 2)),
+            console=_console,
+            refresh_per_second=15,
+            transient=False,
+        )
+        live.start()
+        live_state["live"] = live
+        live_state["streamed"] = True
+
+    live_state["buf"] += content
+    live_state["live"].update(Padding(Markdown(live_state["buf"]), (0, 2)))
+
+
+def _on_node_update(
+    node: str,
+    update: dict,
+    elapsed: float,
+    final_answer: str,
+    spinner: Spinner,
+    live_state: dict,
+) -> str:
+    """节点完成时被调：打 ⏺ 标记 + 维护 spinner / Live 生命周期。
+
+    返回新的 ``final_answer``（沿用旧的或被节点更新覆盖）。
+    """
+    # 父图的 "answer" 节点完成（react 子图整段跑完）：把 Live 收尾、答案确权。
+    if node == "answer":
+        if update.get("final_answer"):
+            final_answer = update["final_answer"]
+        if live_state["live"] is not None:
+            # 用权威 final_answer 替换 Live 的当前内容，防止 buffer 与最终答案有偏差
+            if final_answer:
+                live_state["live"].update(
+                    Padding(Markdown(final_answer), (0, 2))
+                )
+            _close_live(live_state)
+        spinner.freeze_for(lambda: print(_marker("Answer", "完成", elapsed)))
+        spinner.transition(_phase_text("sorcery"))
+        return final_answer
+
+    # 其它节点：一律先暂停 spinner 写一行 ⏺ 标记，再切到下一阶段文案。
+    new_final = _render_node_update_safely(
+        node, update, final_answer, elapsed, spinner,
+    )
+    spinner.transition(_phase_text(node))
+    return new_final
+
+
+def _render_node_update_safely(
+    node: str, update: dict, final_answer: str, elapsed: float, spinner: Spinner,
+) -> str:
+    """``spinner.freeze_for`` 不能跨返回值传递，这里包一层用列表传出。"""
+    holder = [final_answer]
+
+    def _do():
+        holder[0] = _render_node_update(node, update, final_answer, elapsed)
+
+    spinner.freeze_for(_do)
+    return holder[0]
+
+
+def _close_live(live_state: dict) -> None:
+    """关闭 rich.Live，保留已渲染内容（transient=False）。"""
+    live = live_state.get("live")
+    if live is not None:
+        live.stop()
+    live_state["live"] = None
+    # buffer 不清，保留给下游 final_answer 兜底用
+
+
+def _render_node_update(
+    node: str, update: dict, final_answer: str, elapsed: float | None = None,
+) -> str:
     """根据节点名渲染对应的进度标记，并把 final_answer 顺手记下来。"""
     if node == "understand":
         detail = _truncate(_intent_cli_label(update))
-        print(_marker("Understand", detail))
+        print(_marker("Understand", detail, elapsed))
     elif node == "file_read":
         # （兼容老拓扑）file_read 节点已合并到 react 的 read_file 工具
         if update.get("final_answer"):
             final_answer = update["final_answer"]
-        print(_marker("FileRead", "读取完成"))
+        print(_marker("FileRead", "读取完成", elapsed))
     elif node == "search":
         # （兼容老拓扑）search 作为独立节点的版本
         if update.get("step") == "search_failed":
-            print(_marker("Search", "失败，回退到模型知识"))
+            print(_marker("Search", "失败，回退到模型知识", elapsed))
         else:
             sr = update.get("search_results", "") or ""
             hits = len(_HIT_RE.findall(sr))
             detail = f"Top {hits} 结果" if hits else "完成"
-            print(_marker("Search", detail))
+            print(_marker("Search", detail, elapsed))
     elif node == "answer":
+        # 注意：父图 "answer" 节点在 stream_query 已被特别处理（含 Live 收尾）；
+        # 这里只是兼容旧调用路径。
         if update.get("final_answer"):
             final_answer = update["final_answer"]
-        print(_marker("Answer", "整合中"))
+        print(_marker("Answer", "整合中", elapsed))
     elif node == "sorcery":
         if update.get("final_answer"):
             final_answer = update["final_answer"]
         if update.get("step") == "retry_search":
             directive = update.get("retry_directive") or {}
             nsq = _truncate(update.get("search_query", "") or directive.get("instruction", ""))
-            print(_marker("Sorcery", f"不够好，重搜：{nsq}"))
+            print(_marker("Sorcery", f"不够好，重搜：{nsq}", elapsed))
         else:
-            print(_marker("Sorcery", "通过"))
+            print(_marker("Sorcery", "通过", elapsed))
     elif node == "tools":
-        print(_marker("Tools", "执行工具调用"))
+        print(_marker("Tools", "执行工具调用", elapsed))
     elif node == "shell_plan":
         plans = update.get("pending_shell") or {}
         detail = f"生成 {len(plans)} 条命令" if plans else "规划完成"
-        print(_marker("ShellPlan", detail))
+        print(_marker("ShellPlan", detail, elapsed))
     else:
         # 兜底：未知节点也给一行标记，至少能看到流转
-        print(_marker(node))
+        print(_marker(node, "", elapsed))
     return final_answer
 
 
@@ -506,19 +699,39 @@ def run_bang_command(command: str) -> None:
 
 # ── Interactive loop ──────────────────────────────────────────────
 
-def _prompt_boxed_input() -> str:
-    """绘制带边框的输入提示框，用户在框内敲一行；回车后再画底边框。"""
+def _build_status_provider(thread_box: list[str]):
+    """构造给 ``ui_input.make_session`` 用的 status 回调。
+
+    ``thread_box`` 是单元素列表，作为对当前 ``thread_id`` 的可变引用
+    （``/clear`` / ``/resume`` / ``/delete`` 切换会话时直接改写 ``thread_box[0]``）。
+    """
+    def get_status() -> list[tuple[str, str]]:
+        items: list[tuple[str, str]] = [
+            ("thread", (thread_box[0] or "?")[:8]),
+            ("model",  current_model_label() or "—"),
+        ]
+        try:
+            servers = _mcp_manager().list_servers()
+            if servers:
+                items.append(("mcp", str(len(servers))))
+        except Exception:
+            pass
+        return items
+
+    return get_status
+
+
+def _draw_top_border() -> None:
+    """与 prompt_toolkit 输入区配套的视觉上边框；下边框由 ``_draw_bottom_border`` 收尾。"""
     w = _term_width()
     border = "─" * (w - 2)
     print(f"{C.ORANGE}╭{border}╮{C.RESET}")
-    sys.stdout.write(f"{C.ORANGE}│{C.RESET} {C.ORANGE}>{C.RESET} ")
-    sys.stdout.flush()
-    try:
-        text = input()
-    finally:
-        # finally 保证即使输入异常也会把底边框补完，视觉对齐不破
-        print(f"{C.ORANGE}╰{border}╯{C.RESET}")
-    return text
+
+
+def _draw_bottom_border() -> None:
+    w = _term_width()
+    border = "─" * (w - 2)
+    print(f"{C.ORANGE}╰{border}╯{C.RESET}")
 
 
 def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
@@ -536,7 +749,7 @@ def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
         print(f"\n{C.DIM}再见。{C.RESET}")
         return False, thread_id
     if head_lc == "/help":
-        help_block()
+        help_block(tail or None)
     elif head_lc == "/clear":
         # 清屏 + 新建一个 thread_id：等价于一段全新对话。旧线程仍保留在 SqliteSaver 里，
         # 用户可用 /threads 查看 / /resume 恢复 / /delete 删除。
@@ -954,30 +1167,37 @@ def handle_delete_command(args: str, *, current: str) -> str | None:
 
 def interactive_loop(app) -> int:
     """REPL 主循环：每轮读一行用户输入，按前缀决定走哪个分支。"""
-    # 一个会话用一个 thread_id；/clear 会替换它
-    thread_id = str(uuid.uuid4())
+    # 一个会话用一个 thread_id；用单元素列表包一层，方便 status 回调随时取最新值
+    thread_box: list[str] = [str(uuid.uuid4())]
+    session = make_session(_build_status_provider(thread_box))
 
     welcome_box()
     tips_block()
 
     while True:
+        _draw_top_border()
         try:
-            text = _prompt_boxed_input().strip()
-        except EOFError:
-            # Ctrl-D：退出
+            text = read_line(session)
+        finally:
+            # 输入结束后立刻把下边框补完，无论是正常提交还是 Ctrl-C
+            _draw_bottom_border()
+
+        if text is None:
+            # Ctrl-D 或 2 秒内连按 Ctrl-C → 退出
             print(f"\n{C.DIM}再见。{C.RESET}")
             return 0
-        except KeyboardInterrupt:
-            # Ctrl-C：仅取消当前输入，回到下一轮
-            print(f"\n{C.DIM}(已取消，输入 /exit 退出){C.RESET}")
-            continue
-
+        text = text.strip()
         if not text:
+            # 单次 Ctrl-C 或空输入：提示一下再继续
+            print(f"  {C.DIM}(已取消；再次 Ctrl-C 退出，或输入 /exit){C.RESET}")
             continue
 
         # 斜杠命令：走 handle_command 分发
         if text.startswith("/"):
-            keep_going, thread_id = handle_command(text, thread_id=thread_id, app=app)
+            keep_going, new_id = handle_command(
+                text, thread_id=thread_box[0], app=app,
+            )
+            thread_box[0] = new_id  # /clear、/resume、/delete 可能换 id
             if not keep_going:
                 return 0
             continue
@@ -987,14 +1207,12 @@ def interactive_loop(app) -> int:
             run_bang_command(text[1:])
             continue
 
-        # 普通输入：交给 LangGraph 处理
+        # 普通输入：交给 LangGraph 处理（stream_query 自己负责答案渲染）
         try:
-            answer = stream_query(app, text, thread_id)
+            stream_query(app, text, thread_box[0])
         except Exception as exc:
             render_error(str(exc))
             continue
-
-        render_answer(answer)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1065,11 +1283,10 @@ def main() -> int:
     if args.question:
         thread_id = str(uuid.uuid4())
         try:
-            answer = stream_query(app, args.question, thread_id)
+            stream_query(app, args.question, thread_id)
         except Exception as exc:
             render_error(str(exc))
             return 1
-        render_answer(answer)
         return 0
 
     # 没问题参数则进入 REPL
