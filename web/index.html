@@ -11,7 +11,7 @@
     <div class="container">
       <h1><span class="logo">⏺</span> AskAnswer</h1>
       <p class="tagline">基于 LangGraph 的命令行智能助手</p>
-      <p class="subtitle">按意图分流到「读本地文件 / 联网搜索 / 直接回答」，由 LLM 调度工具并整合结果，支持自评改写与 Markdown 渲染。</p>
+      <p class="subtitle">按意图分流到「读文件 / 联网搜索 / 数据库 SQL / 数学计算 / Helix 规格演化 / 直接回答」六类，由 LLM 在 ReAct 子图里调度工具，支持 HITL Shell 确认、自评改写与 Markdown 渲染。</p>
       <div class="cta">
         <a href="#install" class="btn btn-primary">快速开始</a>
         <a href="https://github.com/Right202209/AskAnswer" class="btn btn-ghost" target="_blank" rel="noopener">GitHub</a>
@@ -25,27 +25,39 @@
       <div class="grid">
         <div class="card">
           <h3>🧭 意图分流</h3>
-          <p>自动识别输入属于读文件 / 搜索 / 闲聊，分发到对应节点。</p>
+          <p>自动识别 file_read / search / sql / math / helix / chat 六类，本地正则优先、LLM 兜底。</p>
         </div>
         <div class="card">
           <h3>🔧 工具调度</h3>
-          <p>天气、时间、计算、汇率、IP 查询等内置工具，模型按需调用。</p>
+          <p>天气、时间、计算、汇率、IP、读文件、联网搜索、shell 等内置工具按 intent 暴露给模型。</p>
+        </div>
+        <div class="card">
+          <h3>🗄️ SQL Agent 子图</h3>
+          <p><code>sql_query</code> 工具内部跑 list_tables → schema → generate → check → run；DML/DDL 在执行前硬拦截。</p>
+        </div>
+        <div class="card">
+          <h3>🧬 Helix 规格演化</h3>
+          <p>需求模糊时自动进入苏格拉底式访谈 → seed → execute → evaluate 多代演化，避免「想做但没想清楚」直接动手。</p>
         </div>
         <div class="card">
           <h3>🌐 MCP 热接入</h3>
-          <p>SSE / streamable-HTTP / stdio 三种传输，运行时 <code>/mcp &lt;url&gt;</code> 即连。</p>
+          <p>SSE / streamable-HTTP / stdio 三种传输，运行时 <code>/mcp &lt;url&gt;</code> 即连。<strong>默认仅在 chat intent 暴露</strong>，可设 <code>ASKANSWER_MCP_ALL_INTENTS=1</code> 放开到所有 intent。</p>
         </div>
         <div class="card">
           <h3>🪞 自评改写</h3>
-          <p>sorcery 节点评估答案质量，搜索路径允许改写关键词重跑一次。</p>
+          <p>sorcery 节点按 intent 分派 evaluate；search 路径允许改写关键词重跑，最多 2 次。</p>
+        </div>
+        <div class="card">
+          <h3>💾 SQLite 持久化</h3>
+          <p>LangGraph checkpoint + 自管 thread_meta 共用一个 SQLite 文件；<code>/threads</code> / <code>/resume</code> / <code>/title</code> / <code>/delete</code> 管理历史会话。</p>
         </div>
         <div class="card">
           <h3>🖥️ 类 Claude REPL</h3>
-          <p>圆角欢迎框、箱式输入、<code>⏺ Node(detail)</code> 进度标记、Markdown 渲染。</p>
+          <p>prompt_toolkit 输入、补全、续行；箱式 UI、<code>⏺ Node(detail)</code> 进度、Markdown 渲染、双 Ctrl-C 退出。</p>
         </div>
         <div class="card">
-          <h3>⚡ Shell 前缀</h3>
-          <p><code>!cmd</code> 直接执行 shell 命令；命中高风险模式会二次确认。</p>
+          <h3>⚡ Shell 前缀（HITL）</h3>
+          <p><code>!cmd</code> 直接执行；ReAct 内的 <code>gen_shell_commands_run</code> 走人机确认。命中高风险黑名单（rm/mkfs/dd/sudo/...）会拦截。</p>
         </div>
       </div>
     </section>
@@ -56,7 +68,9 @@
       <p>在项目根目录创建 <code>.env</code>：</p>
       <pre><code>OPENAI_API_KEY=...
 TAVILY_API_KEY=...
-OPENWEATHER_API_KEY=...   # 可选，启用天气工具</code></pre>
+OPENWEATHER_API_KEY=...                 # 可选，启用天气工具
+ASKANSWER_DB_PATH=~/.askanswer/state.db # 可选，覆盖默认 SQLite 路径
+ASKANSWER_MCP_ALL_INTENTS=1             # 可选，把 MCP 工具放开到所有 intent</code></pre>
     </section>
 
     <section id="usage">
@@ -70,35 +84,70 @@ OPENWEATHER_API_KEY=...   # 可选，启用天气工具</code></pre>
           <tr><td><code>/help</code></td><td>显示帮助</td></tr>
           <tr><td><code>/clear</code></td><td>清屏并开启新会话</td></tr>
           <tr><td><code>/status</code></td><td>查看当前会话信息</td></tr>
-          <tr><td><code>/mcp</code></td><td>管理 MCP 服务</td></tr>
-          <tr><td><code>/exit</code> / <code>/quit</code> / <code>/q</code></td><td>退出（也可 Ctrl-D）</td></tr>
+          <tr><td><code>/model [&lt;provider:name&gt;]</code></td><td>查看或切换模型（热替换）</td></tr>
+          <tr><td><code>/mcp [list|tools|remove|&lt;url&gt;]</code></td><td>管理 MCP 服务</td></tr>
+          <tr><td><code>/threads [关键词]</code></td><td>列出历史会话</td></tr>
+          <tr><td><code>/resume &lt;序号|id&gt;</code></td><td>恢复指定会话</td></tr>
+          <tr><td><code>/title &lt;名字&gt;</code></td><td>给当前会话命名</td></tr>
+          <tr><td><code>/delete &lt;序号|id&gt;</code></td><td>删除会话</td></tr>
+          <tr><td><code>!&lt;shell command&gt;</code></td><td>直通执行；高风险命令二次确认</td></tr>
+          <tr><td><code>/exit</code> / <code>/quit</code> / <code>/q</code></td><td>退出（也可 Ctrl-D 或双 Ctrl-C）</td></tr>
         </tbody>
       </table>
     </section>
 
     <section id="workflow">
       <h2>工作流</h2>
-      <pre class="flow"><code>START → understand ─┬─ file_read ───────────┐
-                    ├─ answer (chat) ───────┤
-                    └─ search → answer ─────┤
-                         answer ⇄ tools     │
-                                            ▼
-                                         sorcery ─ {search 重搜 | END}</code></pre>
+      <pre class="flow"><code>START
+  │
+  ▼
+understand_query ─┬─ intent: chat / search / file_read / sql / math / helix
+                  │
+                  ▼
+              answer (ReAct)  ←──────────┐
+                  │                       │
+                  ▼                       │
+              tool_calls?  ── yes ──▶  shell_plan ──▶ tools (含 HITL Shell 确认)
+                  │ no                    │
+                  ▼                       │
+              sorcery ─ retry? ─ yes ─────┘
+                  │ no
+                  ▼
+                 END</code></pre>
+      <p class="note">读文件 / 搜索 / SQL / Helix 不再是独立顶层节点，统一作为工具走 ReAct 子图；shell 工具因为有副作用，在 ReAct 内部单独走 shell_plan → interrupt → 用户确认 → 执行 的 HITL 路径。</p>
     </section>
 
     <section id="tools">
       <h2>内置工具</h2>
       <table>
-        <thead><tr><th>工具</th><th>说明</th></tr></thead>
+        <thead><tr><th>工具</th><th>说明</th><th>暴露的 intent</th></tr></thead>
         <tbody>
-          <tr><td><code>read_file</code></td><td>读取 .txt / .md / .json / .csv / .xlsx 并分析</td></tr>
-          <tr><td><code>check_weather</code></td><td>OpenWeather 实时天气</td></tr>
-          <tr><td><code>get_current_time</code></td><td>指定时区当前时间</td></tr>
-          <tr><td><code>calculate</code></td><td>安全表达式计算</td></tr>
-          <tr><td><code>convert_currency</code></td><td>货币汇率换算</td></tr>
-          <tr><td><code>lookup_ip</code></td><td>IP 地理位置与运营商查询</td></tr>
+          <tr><td><code>read_file</code></td><td>用 markitdown 解析 .txt / .md / .json / .csv / .xlsx / .pdf / .docx 等并由 LLM 总结。<strong>已加敏感文件名拦截 + 10 MB 大小上限</strong>。</td><td>所有</td></tr>
+          <tr><td><code>tavily_search</code></td><td>Tavily 联网搜索 Top 5 + 综合答案</td><td>所有</td></tr>
+          <tr><td><code>check_weather</code></td><td>OpenWeather 实时天气</td><td>所有</td></tr>
+          <tr><td><code>get_current_time</code></td><td>指定时区当前时间</td><td>所有</td></tr>
+          <tr><td><code>calculate</code></td><td>AST 安全沙箱表达式计算</td><td>所有</td></tr>
+          <tr><td><code>convert_currency</code></td><td>货币汇率换算</td><td>所有</td></tr>
+          <tr><td><code>lookup_ip</code></td><td>IP 地理位置与运营商</td><td>所有</td></tr>
+          <tr><td><code>pwd</code></td><td>当前工作目录</td><td>所有</td></tr>
+          <tr><td><code>gen_shell_commands_run</code></td><td>由 LLM 生成 shell 命令并 HITL 确认；<strong>30 秒超时 + 64 KB 输出截断</strong>。</td><td>chat / search / file_read</td></tr>
+          <tr><td><code>sql_query</code></td><td>SQL Agent 子图。<strong>DML/DDL 在执行前硬拦截</strong>，仅允许只读查询。</td><td>chat / sql</td></tr>
+          <tr><td><code>helix_spec_loop</code></td><td>苏格拉底访谈 → seed → execute → evaluate 多代演化</td><td>chat / helix</td></tr>
+          <tr><td colspan="3"><em>MCP 工具按 server 前缀（<code>&lt;server&gt;__&lt;tool&gt;</code>）暴露；默认仅在 chat intent 可见。</em></td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section id="security">
+      <h2>安全须知</h2>
+      <ul>
+        <li><strong>Shell 前缀</strong>：<code>!cmd</code> 与 <code>gen_shell_commands_run</code> 都用同一份高风险黑名单（rm / rmdir / shutdown / reboot / mkfs / dd / sudo / fork-bomb / 重定向覆盖 / kill -9 / chmod -R / chown -R / mv 到根 / 写磁盘设备）；命中后必须二次确认。黑名单 != 白名单，恶意构造仍可能绕过，请只在可信环境使用。</li>
+        <li><strong>MCP</strong>：连接的 MCP server 完全决定它暴露什么工具，工具描述会被注入到模型的 system prompt。请只接信任的 server；默认仅 chat intent 可见，需要时再 <code>ASKANSWER_MCP_ALL_INTENTS=1</code> 放开。</li>
+        <li><strong>SQL</strong>：DML/DDL 在 <code>sql_db_query</code> 执行前硬拦截。如仍需写库，请直接走数据库自身的工具，不要绕过本系统。</li>
+        <li><strong>读文件</strong>：会拒绝读取 <code>.env</code> / SSH 私钥 / <code>credentials</code> / <code>.pgpass</code> 等敏感文件名，以及超过 10 MB 的文件。可通过 <code>ASKANSWER_READ_FILE_MAX_BYTES</code> 调整上限。</li>
+        <li><strong>历史</strong>：prompt_toolkit history 会过滤含 API key / token / 嵌入凭据的 DSN 的输入；<code>ASKANSWER_DB_PATH</code> 同目录下生成 <code>history</code> 文件，敏感会话建议手动清空。</li>
+        <li><strong>.env 覆盖</strong>：<code>load_dotenv(override=True)</code> 让仓库内 <code>.env</code> 覆盖 shell 环境变量。在不可信目录运行前请检查 <code>.env</code> 内容。</li>
+      </ul>
     </section>
   </main>
 

@@ -37,8 +37,15 @@ ALL_BUNDLES = ALL_INTENT_TAGS
 _BUILTIN_TAGS = ALL_INTENT_TAGS | frozenset({"builtin", "io_bound"})
 # Shell 工具刻意从 sql tag 中剔除，让 SQL 流程更聚焦、避免误调用 shell。
 _SHELL_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, "shell"})
-# MCP 工具来自用户安装的外部服务，统一对所有 intent tag 开放。
-_MCP_TAGS = ALL_INTENT_TAGS | frozenset({"mcp", "external_api"})
+# MCP 工具来自用户安装的外部服务。默认仅暴露给 chat intent，避免在 sql/file_read/
+# math/search 等更具体的流程被 prompt 注入诱导调用付费/写副作用 API。
+# 用户如确认要在所有 intent 下使用 MCP，可设环境变量
+# ASKANSWER_MCP_ALL_INTENTS=1 重新放开（兼容旧行为）。
+import os as _os
+if (_os.environ.get("ASKANSWER_MCP_ALL_INTENTS") or "").strip().lower() in {"1", "true", "yes"}:
+    _MCP_TAGS = ALL_INTENT_TAGS | frozenset({"mcp", "external_api"})
+else:
+    _MCP_TAGS = frozenset({TAG_CHAT, "mcp", "external_api"})
 
 ConfirmationClass = Literal["none", "shell", "fs_write", "external_api_paid"]
 

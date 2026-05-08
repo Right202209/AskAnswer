@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -86,6 +87,32 @@ def _history_path() -> Path:
     return base / "history"
 
 
+# 命中即跳过写入 history 的常见敏感模式：API key、token、嵌入凭据的 DSN 等。
+# 设计取舍：只做防御性过滤，不替代用户在敏感操作前手动 `export ASKANSWER_NO_HISTORY=1`。
+_SECRET_HISTORY_RE = re.compile(
+    r"""(?ix)
+    sk-[A-Za-z0-9_-]{16,}              # OpenAI / 兼容 key
+    | tvly-[A-Za-z0-9_-]{16,}          # Tavily key
+    | xox[abprs]-[A-Za-z0-9-]{10,}     # Slack token
+    | gh[pousr]_[A-Za-z0-9]{16,}       # GitHub token
+    | AKIA[0-9A-Z]{12,}                # AWS access key id
+    | (?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+   # 显式赋值
+    | [A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^@\s/]+@               # DSN(user:pass@host)
+    """,
+)
+
+
+class _FilteredFileHistory(FileHistory):
+    """跳过包含敏感模式的输入，避免 API key / DSN 被明文落盘到 history。"""
+
+    def store_string(self, string: str) -> None:
+        if not string:
+            return
+        if _SECRET_HISTORY_RE.search(string):
+            return
+        super().store_string(string)
+
+
 # 整体配色：橙色提示符 + 灰白底栏 + 高亮当前补全项
 _PROMPT_STYLE = Style.from_dict({
     "prompt.border":      "#ffaf00",
@@ -127,7 +154,7 @@ def make_session(get_status: Callable[[], list[tuple[str, str]]]) -> PromptSessi
     # 留个钩子：以后想加 “/” 即开补全菜单 / Esc-Enter 多行 / Ctrl-L 清屏 都接在这。
 
     return PromptSession(
-        history=FileHistory(str(_history_path())),
+        history=_FilteredFileHistory(str(_history_path())),
         completer=_SlashCompleter(),
         complete_while_typing=True,
         bottom_toolbar=bottom_toolbar,

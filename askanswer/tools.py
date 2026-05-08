@@ -7,6 +7,7 @@ import platform
 import shlex
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -169,6 +170,11 @@ def read_file(path: str) -> str:
     参数: path (str): 文件路径
     返回: str: AI 对文件内容的分析结果
     """
+    # 安全闸门：拦截敏感文件、超大文件、不存在或非普通文件的路径，避免被 prompt
+    # 注入诱导去读 SSH/凭据/历史数据库或喂入畸形大文件拖垮进程。
+    error = _validate_read_path(path)
+    if error:
+        return error
     # 先用 markitdown 把任何格式（pdf/docx/xlsx/...）转成统一的 Markdown 文本
     data = markitdown(path)
     # 再交给 LLM 做语义分析；结构化文件说字段，代码文件解释逻辑
@@ -183,6 +189,60 @@ def markitdown(file_path: str) -> str:
     md = MarkItDown(enable_plugins=True)
     result = md.convert(file_path)
     return result.text_content
+
+
+# read_file 安全限制：默认 10 MB，可通过环境变量 ASKANSWER_READ_FILE_MAX_BYTES 调整
+_READ_FILE_MAX_BYTES = int(os.environ.get("ASKANSWER_READ_FILE_MAX_BYTES") or 10 * 1024 * 1024)
+
+# 命中即拒绝读取的敏感文件名/扩展（不区分大小写）。
+# 设计：宁可误拒少数同名普通文件，也不能让 LLM 把凭据/密钥读进上下文。
+_SENSITIVE_PATH_RE = re.compile(
+    r"""(?ix)
+    (?:^|/)(?:
+        \.env(?:\.[^/]*)?$            # .env / .env.local / .env.production
+      | id_(?:rsa|dsa|ed25519|ecdsa)  # SSH 私钥
+      | authorized_keys$
+      | known_hosts$
+      | credentials$                  # AWS / gcloud
+      | \.pgpass$
+      | \.netrc$
+      | \.htpasswd$
+      | shadow$
+      | wallet\.dat$
+    )
+    | \.(?:pem|key|p12|pfx|kdbx|gpg|asc|jks|keystore)$
+    """,
+)
+
+
+def _validate_read_path(path: str) -> str | None:
+    """读文件前的安全校验。返回错误字符串表示拒绝；None 表示放行。"""
+    raw = (path or "").strip()
+    if not raw:
+        return "未提供文件路径"
+    try:
+        # 只解析符号链接到真实路径用于敏感检测；下游仍用原始路径让 markitdown 处理
+        resolved = Path(raw).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        return f"路径解析失败：{exc}"
+    if not resolved.exists():
+        return f"文件不存在：{raw}"
+    if not resolved.is_file():
+        return f"路径不是普通文件：{raw}"
+    # 同时检查原始路径与解析后路径，避免符号链接绕过
+    for candidate in {raw, str(resolved)}:
+        if _SENSITIVE_PATH_RE.search(candidate):
+            return f"已拒绝读取敏感文件：{Path(candidate).name}"
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        return f"获取文件大小失败：{exc}"
+    if size > _READ_FILE_MAX_BYTES:
+        return (
+            f"文件过大（{size} 字节 > 上限 {_READ_FILE_MAX_BYTES}）；"
+            f"如需读取，调整 ASKANSWER_READ_FILE_MAX_BYTES 环境变量。"
+        )
+    return None
 
 
 @tool
@@ -349,11 +409,24 @@ def execute_shell_command(command: str, shell: bool = False) -> str:
         f"命令：{command}",
         f"返回码：{process.returncode}（{'成功' if ok else '失败'}）",
     ]
+    # 输出截断：每路 stream 各 64 KB 上限，防止单条命令的大输出把 prompt 撑爆。
     if stdout:
-        parts.append(f"stdout:\n{stdout.strip()}")
+        parts.append(f"stdout:\n{_truncate_stream(stdout.strip(), 'stdout')}")
     if stderr:
-        parts.append(f"stderr:\n{stderr.strip()}")
+        parts.append(f"stderr:\n{_truncate_stream(stderr.strip(), 'stderr')}")
     return "\n".join(parts)
+
+
+# 单路 stdout/stderr 的文本上限；超出则截断并附说明，避免拖垮 LLM prompt 与 checkpoint
+_SHELL_OUTPUT_MAX_BYTES = int(os.environ.get("ASKANSWER_SHELL_OUTPUT_MAX_BYTES") or 64 * 1024)
+
+
+def _truncate_stream(text: str, label: str) -> str:
+    """对 shell 子进程单路输出做硬截断；命中上限时附带省略字符数提示。"""
+    if len(text) <= _SHELL_OUTPUT_MAX_BYTES:
+        return text
+    omitted = len(text) - _SHELL_OUTPUT_MAX_BYTES
+    return f"{text[:_SHELL_OUTPUT_MAX_BYTES]}\n[{label} 已截断，省略 {omitted} 字符]"
 
 
 # 对外暴露的危险检查别名（_react_internals 与 cli 都会用到）

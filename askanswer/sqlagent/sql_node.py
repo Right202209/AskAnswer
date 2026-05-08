@@ -2,6 +2,7 @@
 # 这里的核心思路：每个节点都尽量薄，复杂逻辑（截断、消息组装）抽成纯函数辅助。
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -17,6 +18,49 @@ from .sql_interact import get_sql_dialect, get_sql_tool
 MAX_TABLE_LIST_CHARS = 4000
 MAX_SCHEMA_CHARS = 12000
 MAX_QUERY_RESULT_CHARS = 8000
+
+
+# DML/DDL 关键字硬名单。SQL agent 只允许只读查询：即使模型偏航或 prompt 注入
+# 让它生成 INSERT/UPDATE/DELETE/DROP/ALTER/...，也要在执行前直接拦截，而不是
+# 只靠 prompt 里写一句 "DO NOT make DML" 那种软约束。
+_FORBIDDEN_SQL_KEYWORDS = frozenset({
+    "insert", "update", "delete", "drop", "truncate", "alter",
+    "create", "replace", "grant", "revoke", "merge", "rename",
+    "comment", "lock", "vacuum", "reindex", "cluster", "attach",
+    "detach", "begin", "commit", "rollback", "savepoint",
+})
+
+# 注释清理：先去块注释 /* */ 再去行注释 -- 直到行尾
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", flags=re.S)
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_FIRST_TOKEN_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _check_sql_readonly(sql: str) -> str | None:
+    """对单条/多条 SQL 做只读校验。命中破坏性关键字时返回该关键字，否则返回 None。"""
+    if not sql or not sql.strip():
+        return None
+    cleaned = _BLOCK_COMMENT_RE.sub(" ", sql)
+    cleaned = _LINE_COMMENT_RE.sub(" ", cleaned)
+    # 用 ; 拆多语句；任意一条命中即拒绝整批
+    for stmt in cleaned.split(";"):
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        match = _FIRST_TOKEN_RE.match(stmt)
+        if not match:
+            continue
+        first = match.group(1).lower()
+        # WITH ... AS (...) SELECT 也允许；只在 WITH 后跟 INSERT/UPDATE/DELETE 时拦
+        if first == "with":
+            tail = stmt[match.end():]
+            inner = re.search(r"\)\s*([A-Za-z_]+)", tail)
+            if inner and inner.group(1).lower() in _FORBIDDEN_SQL_KEYWORDS:
+                return inner.group(1).lower()
+            continue
+        if first in _FORBIDDEN_SQL_KEYWORDS:
+            return first
+    return None
 
 
 def _runtime_context(runtime: Runtime[ContextSchema]) -> ContextSchema:
@@ -141,12 +185,55 @@ def get_schema_node(state: MessagesState, runtime: Runtime[ContextSchema]) -> di
 
 
 def run_query_node(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
-    """真正执行 SQL 的节点；同时累加 query_count 用于上限判断。"""
-    result = _run_last_tool_calls(state, _tool("sql_db_query", runtime))
-    if result["messages"]:
+    """真正执行 SQL 的节点；同时累加 query_count 用于上限判断。
+
+    在调用底层 sql_db_query 之前，做一次只读校验：命中 INSERT/UPDATE/DELETE/DROP
+    等破坏性关键字直接合成一条拒绝 ToolMessage 返回，不下放到数据库执行。
+    """
+    sql_tool = _tool("sql_db_query", runtime)
+    last_message = state["messages"][-1]
+    tool_calls = list(getattr(last_message, "tool_calls", None) or [])
+    responses: list[ToolMessage] = []
+    for tool_call in tool_calls:
+        requested_name = tool_call["name"]
+        if requested_name != sql_tool.name:
+            content = f"SQL 工具名不匹配：期望 {sql_tool.name}，收到 {requested_name}"
+            responses.append(
+                ToolMessage(
+                    content=_trim_observation(requested_name, content),
+                    tool_call_id=tool_call["id"],
+                    name=requested_name,
+                )
+            )
+            continue
+        query = str((tool_call.get("args") or {}).get("query") or "")
+        forbidden = _check_sql_readonly(query)
+        if forbidden:
+            content = (
+                f"已拦截破坏性 SQL（{forbidden.upper()}）：本系统仅允许只读查询。\n"
+                f"原 SQL：{query}"
+            )
+            responses.append(
+                ToolMessage(
+                    content=_trim_observation(sql_tool.name, content),
+                    tool_call_id=tool_call["id"],
+                    name=sql_tool.name,
+                )
+            )
+            continue
+        result = sql_tool.invoke(tool_call.get("args") or {})
+        responses.append(
+            ToolMessage(
+                content=_trim_observation(sql_tool.name, result),
+                tool_call_id=tool_call["id"],
+                name=sql_tool.name,
+            )
+        )
+    out: dict = {"messages": responses}
+    if responses:
         # 一次 AIMessage 可能并发触发多条 sql_db_query，按消息条数累加
-        result["query_count"] = state.get("query_count", 0) + len(result["messages"])
-    return result
+        out["query_count"] = state.get("query_count", 0) + len(responses)
+    return out
 
 
 def list_tables(state: MessagesState, runtime: Runtime[ContextSchema]) -> dict:
