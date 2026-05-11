@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -21,6 +22,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
+from .audit import log_event, summarize_args
 from .intents import get_intent_registry
 from .load import model
 from .registry import get_registry
@@ -177,8 +179,15 @@ def _tools_node(
     if plain_calls:
         # 把每个工具调用映射到注册表里的描述符，找不到的视为未知工具
         plain_descriptors = [registry.get(tc["name"]) for tc in plain_calls]
-        plain_tools = [d.tool for d in plain_descriptors if d is not None]
-        unknown = [tc for tc, d in zip(plain_calls, plain_descriptors) if d is None]
+        known_calls = [
+            tc for tc, descriptor in zip(plain_calls, plain_descriptors)
+            if descriptor is not None
+        ]
+        plain_tools = [
+            descriptor.tool for descriptor in plain_descriptors
+            if descriptor is not None
+        ]
+        unknown = [tc for tc, descriptor in zip(plain_calls, plain_descriptors) if descriptor is None]
 
         if plain_tools:
             # ToolNode 会自动从 LangGraph 的 contextvar 读取父运行时上下文，
@@ -186,13 +195,22 @@ def _tools_node(
             tool_node = ToolNode(plain_tools, handle_tool_errors=True)
             # 临时构造一个只含“普通工具调用”的 AIMessage 副本喂给 ToolNode，
             # 避免 ToolNode 把需要确认的工具也跑了
-            sub_msg = _clone_message_with_calls(last_msg, plain_calls)
+            sub_msg = _clone_message_with_calls(last_msg, known_calls)
             sub_state = {"messages": list(state["messages"][:-1]) + [sub_msg]}
+            started = time.monotonic()
             try:
                 result = tool_node.invoke(sub_state)
             except Exception as exc:
+                duration_ms = int((time.monotonic() - started) * 1000)
                 # 兜底：把异常包成 ToolMessage 返回，避免整个图崩溃
-                for tc in plain_calls:
+                for tc in known_calls:
+                    log_event(
+                        kind="tool_call",
+                        tool_name=tc["name"],
+                        args_summary=summarize_args(tc.get("args") or {}),
+                        duration_ms=duration_ms,
+                        error=str(exc),
+                    )
                     out_messages.append(
                         ToolMessage(
                             content=f"工具 {tc['name']} 执行失败：{exc}",
@@ -201,10 +219,32 @@ def _tools_node(
                         )
                     )
             else:
-                out_messages.extend(result.get("messages", []))
+                duration_ms = int((time.monotonic() - started) * 1000)
+                result_messages = result.get("messages", [])
+                by_call_id = {
+                    getattr(message, "tool_call_id", None): message
+                    for message in result_messages
+                }
+                for tc in known_calls:
+                    message = by_call_id.get(tc.get("id"))
+                    content = getattr(message, "content", "") if message else ""
+                    log_event(
+                        kind="tool_call",
+                        tool_name=tc["name"],
+                        args_summary=summarize_args(tc.get("args") or {}),
+                        result_size=len(str(content)),
+                        duration_ms=duration_ms,
+                    )
+                out_messages.extend(result_messages)
 
         # 未知工具：返回“未注册”消息，让 LLM 下一轮换工具
         for tc in unknown:
+            log_event(
+                kind="tool_call",
+                tool_name=tc["name"],
+                args_summary=summarize_args(tc.get("args") or {}),
+                error="unknown tool",
+            )
             out_messages.append(
                 ToolMessage(
                     content=f"未知工具：{tc['name']}",
@@ -214,6 +254,12 @@ def _tools_node(
             )
 
     for tc in unsupported_confirm_calls:
+        log_event(
+            kind="tool_call",
+            tool_name=tc["name"],
+            args_summary=summarize_args(tc.get("args") or {}),
+            error=f"unsupported confirmation class: {confirmation_classes[tc['name']]}",
+        )
         out_messages.append(
             ToolMessage(
                 content=(
@@ -255,6 +301,12 @@ def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
     explanation = plan.get("explanation") or ""
     # 没规划出有效命令直接返回错误信息，不往后走
     if not command:
+        log_event(
+            kind="shell_reject",
+            tool_name=tool_call["name"],
+            args_summary=summarize_args({"command": command, "reason": explanation}),
+            error=explanation or "empty command",
+        )
         return ToolMessage(
             content=explanation or "未能生成有效的 shell 命令",
             tool_call_id=tool_call["id"],
@@ -264,6 +316,12 @@ def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
     # 用户确认前先做一次危险命令检查，避免诱导用户点 y 后造成损失
     danger = check_dangerous(command)
     if danger:
+        log_event(
+            kind="shell_reject",
+            tool_name=tool_call["name"],
+            args_summary=summarize_args({"command": command}),
+            error=f"dangerous command: {danger}",
+        )
         return ToolMessage(
             content=f"已拦截高风险命令（{danger}）：{command}",
             tool_call_id=tool_call["id"],
@@ -282,6 +340,11 @@ def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
     # 用户可能修改了命令，需要重新做危险检查
     approved, approved_command = _parse_decision(decision, fallback_command=command)
     if not approved:
+        log_event(
+            kind="shell_reject",
+            tool_name=tool_call["name"],
+            args_summary=summarize_args({"command": approved_command}),
+        )
         return ToolMessage(
             content=f"已取消执行：{approved_command}",
             tool_call_id=tool_call["id"],
@@ -289,14 +352,29 @@ def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
         )
     danger = check_dangerous(approved_command)
     if danger:
+        log_event(
+            kind="shell_reject",
+            tool_name=tool_call["name"],
+            args_summary=summarize_args({"command": approved_command}),
+            error=f"dangerous command: {danger}",
+        )
         return ToolMessage(
             content=f"已拦截高风险命令（{danger}）：{approved_command}",
             tool_call_id=tool_call["id"],
             name=tool_call["name"],
         )
     # 真正执行命令；输出包装为 ToolMessage 回填到对话
+    started = time.monotonic()
+    content = execute_shell_command(approved_command)
+    log_event(
+        kind="shell_approve",
+        tool_name=tool_call["name"],
+        args_summary=summarize_args({"command": approved_command}),
+        result_size=len(content),
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
     return ToolMessage(
-        content=execute_shell_command(approved_command),
+        content=content,
         tool_call_id=tool_call["id"],
         name=tool_call["name"],
     )

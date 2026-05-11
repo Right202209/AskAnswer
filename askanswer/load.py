@@ -9,6 +9,8 @@ from langchain.chat_models import init_chat_model
 from langchain_openai import OpenAI
 from tavily import TavilyClient
 
+from .audit import with_llm_audit_callback
+
 # override=True：让 .env 中的值覆盖已经存在的同名环境变量，便于本地调试。
 load_dotenv(override=True)
 
@@ -59,6 +61,20 @@ class _ModelProxy:
         # 任何未知属性的访问都转发到真实 backend（如 invoke / bind_tools / stream 等）
         return getattr(self._inner, name)
 
+    def invoke(self, *args, **kwargs):
+        args, kwargs = _inject_audit_callback(args, kwargs)
+        return self._inner.invoke(*args, **kwargs)
+
+    def stream(self, *args, **kwargs):
+        args, kwargs = _inject_audit_callback(args, kwargs)
+        return self._inner.stream(*args, **kwargs)
+
+    def bind_tools(self, *args, **kwargs):
+        return _AuditedRunnable(self._inner.bind_tools(*args, **kwargs))
+
+    def with_structured_output(self, *args, **kwargs):
+        return _AuditedRunnable(self._inner.with_structured_output(*args, **kwargs))
+
     def __setattr__(self, name, value):
         # 写属性也转发给 backend，保持代理透明
         setattr(self._inner, name, value)
@@ -66,6 +82,45 @@ class _ModelProxy:
     def __repr__(self):
         # 调试时清楚地看到当前实际使用的 provider:spec
         return f"<ModelProxy {self._provider}:{self._spec}>"
+
+
+class _AuditedRunnable:
+    """Wrap derived runnables so their invoke/stream calls keep audit callbacks."""
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def invoke(self, *args, **kwargs):
+        args, kwargs = _inject_audit_callback(args, kwargs)
+        return self._inner.invoke(*args, **kwargs)
+
+    def stream(self, *args, **kwargs):
+        args, kwargs = _inject_audit_callback(args, kwargs)
+        return self._inner.stream(*args, **kwargs)
+
+    def bind_tools(self, *args, **kwargs):
+        return _AuditedRunnable(self._inner.bind_tools(*args, **kwargs))
+
+    def with_structured_output(self, *args, **kwargs):
+        return _AuditedRunnable(self._inner.with_structured_output(*args, **kwargs))
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _inject_audit_callback(args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """Append the audit callback to a RunnableConfig if one is present."""
+    config = None
+    if len(args) >= 2:
+        config = args[1]
+        args = (args[0], with_llm_audit_callback(config, model_label=current_model_label()), *args[2:])
+        return args, kwargs
+    config = kwargs.get("config")
+    kwargs = dict(kwargs)
+    kwargs["config"] = with_llm_audit_callback(config, model_label=current_model_label())
+    return args, kwargs
 
 
 # 启动时的默认模型，可以通过 /model 命令运行时替换

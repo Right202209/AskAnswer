@@ -11,15 +11,24 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import os
 import re
+import shlex
 import sys
 import time
 import unicodedata
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import (
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 from langgraph.types import Command
 from rich.console import Console
 from rich.live import Live
@@ -27,16 +36,20 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 
 from .graph import create_search_assistant, draw_search_assistant_mermaid
+from .audit import begin_run, end_run, flush_pending, log_event
 from .intents import get_intent_registry
 from .load import current_model_label, model, set_model
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
 from .persistence import (
+    AuditEvent,
     ThreadMeta,
     get_persistence,
     shutdown_persistence,
 )
+from .pricing import estimate_cost_usd, format_cost
 from .registry import get_registry
 from .schema import ContextSchema
+from .timetravel import fork_thread, list_checkpoints, rewind_to
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 from .ui_input import SLASH_COMMANDS, cmd_meta, make_session, read_line
 from .ui_select import CANCELLED, select_option
@@ -200,6 +213,15 @@ def _help_examples(cmd: str) -> list[str]:
         "/resume":  ["/resume 1", "/resume 1e14b9b"],
         "/title":   ["/title 周三的 SQL 调试"],
         "/delete":  ["/delete 1", "/delete 1e14b9b"],
+        "/checkpoints": ["/checkpoints"],
+        "/undo":    ["/undo", "/undo 2"],
+        "/jump":    ["/jump 3"],
+        "/fork":    ["/fork", "/fork 2"],
+        "/audit":   ["/audit", "/audit 1 --limit 20", "/audit --kind tool_call"],
+        "/usage":   ["/usage --days 1", "/usage --thread 1"],
+        "/export":  ["/export 1 --format md --out /tmp/thread.md",
+                     "/export current --format json --out /tmp/thread.json"],
+        "/import":  ["/import /tmp/thread.json"],
     }
     return table.get(cmd, [])
 
@@ -309,6 +331,7 @@ def stream_query(
     config = {"configurable": {"thread_id": thread_id}}
     context = runtime_context or _runtime_context()
     graph_input: object = {"messages": [HumanMessage(content=query)]}
+    audit_tokens = begin_run(thread_id)
 
     print()
     spinner = Spinner("理解意图…")
@@ -363,6 +386,15 @@ def stream_query(
     finally:
         _close_live(live_state)
         spinner.stop()
+        audit_intent = None
+        try:
+            audit_state = app.get_state(config)
+            audit_values = getattr(audit_state, "values", {}) or {}
+            audit_intent = audit_values.get("intent")
+        except Exception:
+            pass
+        flush_pending(thread_id=thread_id, intent=audit_intent)
+        end_run(audit_tokens)
 
     # 兜底：若节点流里没拿到 final_answer，从 state 里找最后一条消息内容
     if not final_answer:
@@ -764,9 +796,9 @@ def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
     elif head_lc == "/status":
         status_block(thread_id)
     elif head_lc == "/model":
-        handle_model_command(tail)
+        handle_model_command(tail, thread_id=thread_id)
     elif head_lc == "/mcp":
-        handle_mcp_command(tail)
+        handle_mcp_command(tail, thread_id=thread_id)
     elif head_lc == "/threads":
         handle_threads_command(tail, current=thread_id)
     elif head_lc == "/resume":
@@ -780,6 +812,26 @@ def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
         if new_id:
             # 删的是当前 thread：自动开新会话
             thread_id = new_id
+    elif head_lc == "/checkpoints":
+        handle_checkpoints_command(tail, thread_id=thread_id, app=app)
+    elif head_lc == "/undo":
+        handle_undo_command(tail, thread_id=thread_id, app=app)
+    elif head_lc == "/jump":
+        handle_jump_command(tail, thread_id=thread_id, app=app)
+    elif head_lc == "/fork":
+        new_id = handle_fork_command(tail, current=thread_id, app=app)
+        if new_id:
+            thread_id = new_id
+    elif head_lc == "/audit":
+        handle_audit_command(tail, current=thread_id)
+    elif head_lc == "/usage":
+        handle_usage_command(tail, current=thread_id)
+    elif head_lc == "/export":
+        handle_export_command(tail, current=thread_id, app=app)
+    elif head_lc == "/import":
+        new_id = handle_import_command(tail, app=app)
+        if new_id:
+            thread_id = new_id
     else:
         print(
             f"\n  {C.RED}未知命令：{C.RESET}{stripped}  "
@@ -788,7 +840,7 @@ def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
     return True, thread_id
 
 
-def handle_model_command(args: str) -> None:
+def handle_model_command(args: str, *, thread_id: str) -> None:
     """/model：无参数显示当前模型；带参数尝试切换模型。"""
     if not args:
         print()
@@ -805,13 +857,20 @@ def handle_model_command(args: str) -> None:
     except Exception as exc:
         render_error(f"模型切换失败: {exc}")
         return
+    log_event(
+        kind="model_swap",
+        thread_id=thread_id,
+        model_label=label,
+        args_summary=args,
+        immediate=True,
+    )
 
     print()
     print(f"  {C.GREEN}✓ 已切换模型:{C.RESET} {C.BOLD}{label}{C.RESET}")
     print()
 
 
-def handle_mcp_command(args: str) -> None:
+def handle_mcp_command(args: str, *, thread_id: str) -> None:
     """/mcp 子命令分发：list / tools / remove / 添加（URL 直接形式）。"""
     if not args:
         # 无参：先列出已连服务，再展示 /mcp 的帮助
@@ -836,7 +895,7 @@ def handle_mcp_command(args: str) -> None:
         mcp_help_block()
     elif first.startswith(("http://", "https://")):
         # 直接传 URL 等价于添加一个新服务
-        _add_mcp_url(first, rest or None)
+        _add_mcp_url(first, rest or None, thread_id=thread_id)
     else:
         print(
             f"\n  {C.RED}无法识别 /mcp 参数：{C.RESET}{args}\n"
@@ -845,16 +904,31 @@ def handle_mcp_command(args: str) -> None:
         mcp_help_block()
 
 
-def _add_mcp_url(url: str, name: str | None) -> None:
+def _add_mcp_url(url: str, name: str | None, *, thread_id: str) -> None:
     """连接一个 HTTP/SSE 类的 MCP 服务，并刷新工具注册表。"""
     try:
         registered = _mcp_manager().add_url(url, name=name)
     except Exception as exc:
+        log_event(
+            kind="mcp_connect",
+            thread_id=thread_id,
+            args_summary=url,
+            error=str(exc),
+            immediate=True,
+        )
         render_error(f"MCP 连接失败: {exc}")
         return
     # 注册表里 mcp:* 这一片需要重新拉取
     get_registry().refresh_mcp()
     tools = _mcp_manager().list_tools(server=registered)
+    log_event(
+        kind="mcp_connect",
+        thread_id=thread_id,
+        tool_name=registered,
+        args_summary=url,
+        result_size=len(tools),
+        immediate=True,
+    )
     print()
     print(
         f"  {C.GREEN}✓ 已连接 MCP:{C.RESET} {C.BOLD}{registered}{C.RESET}  "
@@ -1131,7 +1205,7 @@ def handle_delete_command(args: str, *, current: str) -> str | None:
     )
     if is_current:
         print(f"    {C.GOLD}这是当前会话；删除后将自动开始新会话。{C.RESET}")
-    print(f"    {C.DIM}操作不可撤销（同步清除 checkpoints + thread_meta）。{C.RESET}")
+    print(f"    {C.DIM}操作不可撤销（同步清除 checkpoints + thread_meta + audit）。{C.RESET}")
     try:
         reply = input(f"    {C.ORANGE}确认删除? (y/N):{C.RESET} ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -1162,6 +1236,467 @@ def handle_delete_command(args: str, *, current: str) -> str | None:
         new_id = str(uuid.uuid4())
         print(f"  {C.DIM}已开始新会话：{new_id[:8]}…{C.RESET}\n")
         return new_id
+    return None
+
+
+# ── Checkpoints / Audit / Import-Export ───────────────────────────────
+
+def handle_checkpoints_command(args: str, *, thread_id: str, app=None) -> None:
+    if app is None:
+        render_error("/checkpoints 只能在已初始化的图上使用")
+        return
+    try:
+        checkpoints = list_checkpoints(app, thread_id)
+    except Exception as exc:
+        render_error(f"读取 checkpoints 失败: {exc}")
+        return
+
+    print()
+    if not checkpoints:
+        print(f"  {C.DIM}（当前会话暂无 checkpoints）{C.RESET}\n")
+        return
+    print(f"  {C.BOLD}Checkpoints ({len(checkpoints)}){C.RESET}")
+    for cp in checkpoints:
+        latest = " latest" if cp.index == 0 else ""
+        pending = f" {C.GOLD}pending-shell{C.RESET}" if cp.pending_shell else ""
+        print(
+            f"   {C.DIM}#{cp.index:<2}{C.RESET} "
+            f"{C.CYAN}{cp.node:<12}{C.RESET} "
+            f"{C.DIM}{_format_ts(cp.created_at)}{C.RESET}  "
+            f"{C.DIM}{cp.message_count} msgs · step={cp.step}{latest}{C.RESET}{pending}"
+        )
+    print()
+    print(
+        f"  {C.DIM}用法：{C.RESET}"
+        f"{C.CYAN}/undo [n]{C.RESET}{C.DIM} 回到第 n 个历史点 · {C.RESET}"
+        f"{C.CYAN}/jump <index>{C.RESET}{C.DIM} 显式跳转 · {C.RESET}"
+        f"{C.CYAN}/fork [index]{C.RESET}{C.DIM} 分叉新会话{C.RESET}"
+    )
+    print()
+
+
+def handle_undo_command(args: str, *, thread_id: str, app=None) -> None:
+    raw = args.strip()
+    index = 1 if not raw else _parse_nonnegative_int(raw)
+    if index is None or index < 1:
+        print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/undo [n]{C.RESET}  {C.DIM}n 默认为 1{C.RESET}\n")
+        return
+    _rewind_command(app, thread_id, index, label="/undo")
+
+
+def handle_jump_command(args: str, *, thread_id: str, app=None) -> None:
+    index = _parse_nonnegative_int(args.strip())
+    if index is None:
+        print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/jump <checkpoint-index>{C.RESET}\n")
+        return
+    _rewind_command(app, thread_id, index, label="/jump")
+
+
+def _rewind_command(app, thread_id: str, index: int, *, label: str) -> None:
+    if app is None:
+        render_error(f"{label} 只能在已初始化的图上使用")
+        return
+    try:
+        target = rewind_to(app, thread_id, index)
+    except Exception as exc:
+        render_error(f"{label} 失败: {exc}")
+        return
+    print()
+    print(
+        f"  {C.GREEN}✓ 已回到 checkpoint:{C.RESET} "
+        f"{C.CYAN}#{target.index}{C.RESET}  "
+        f"{C.DIM}{target.node} · {target.message_count} msgs · step={target.step}{C.RESET}"
+    )
+    print(f"  {C.DIM}下一条问题会基于该快照继续。{C.RESET}\n")
+
+
+def handle_fork_command(args: str, *, current: str, app=None) -> str | None:
+    if app is None:
+        render_error("/fork 只能在已初始化的图上使用")
+        return None
+    raw = args.strip()
+    index = 0 if not raw else _parse_nonnegative_int(raw)
+    if index is None:
+        print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/fork [checkpoint-index]{C.RESET}\n")
+        return None
+    try:
+        new_id = fork_thread(app, current, get_persistence(), index=index)
+    except Exception as exc:
+        render_error(f"分叉失败: {exc}")
+        return None
+    print()
+    print(
+        f"  {C.GREEN}✓ 已分叉新会话:{C.RESET} "
+        f"{C.CYAN}{new_id[:8]}{C.RESET}  {C.DIM}来源 checkpoint #{index}{C.RESET}"
+    )
+    print(f"  {C.DIM}已切换到新会话；旧会话保持不变。{C.RESET}\n")
+    return new_id
+
+
+def handle_audit_command(args: str, *, current: str) -> None:
+    parts = _split_args(args)
+    if parts is None:
+        return
+    target_arg = None
+    kind = None
+    limit = 30
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--kind" and i + 1 < len(parts):
+            kind = parts[i + 1]
+            i += 2
+        elif part == "--limit" and i + 1 < len(parts):
+            parsed = _parse_nonnegative_int(parts[i + 1])
+            if parsed is None or parsed <= 0:
+                print(f"\n  {C.RED}--limit 必须是正整数{C.RESET}\n")
+                return
+            limit = parsed
+            i += 2
+        elif part.startswith("--"):
+            print(f"\n  {C.RED}未知参数：{C.RESET}{part}\n")
+            return
+        elif target_arg is None:
+            target_arg = part
+            i += 1
+        else:
+            print(f"\n  {C.RED}多余参数：{C.RESET}{part}\n")
+            return
+    target = _resolve_thread_or_current(target_arg, current)
+    if target is None:
+        print(f"\n  {C.RED}找不到匹配的会话：{C.RESET}{target_arg}\n")
+        return
+    try:
+        events = get_persistence().list_audit_events(
+            thread_id=target.thread_id,
+            kind=kind,
+            limit=limit,
+        )
+    except Exception as exc:
+        render_error(f"读取审计失败: {exc}")
+        return
+    _print_audit_events(events, target)
+
+
+def handle_usage_command(args: str, *, current: str) -> None:
+    parts = _split_args(args)
+    if parts is None:
+        return
+    days = 7
+    thread = None
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--days" and i + 1 < len(parts):
+            parsed = _parse_nonnegative_int(parts[i + 1])
+            if parsed is None:
+                print(f"\n  {C.RED}--days 必须是整数{C.RESET}\n")
+                return
+            days = parsed
+            i += 2
+        elif part == "--thread" and i + 1 < len(parts):
+            thread = _resolve_thread_or_current(parts[i + 1], current)
+            if thread is None:
+                print(f"\n  {C.RED}找不到匹配的会话：{C.RESET}{parts[i + 1]}\n")
+                return
+            i += 2
+        else:
+            print(f"\n  {C.RED}未知参数：{C.RESET}{part}\n")
+            return
+    try:
+        summary = get_persistence().usage_summary(
+            thread_id=thread.thread_id if thread else None,
+            days=days,
+        )
+    except Exception as exc:
+        render_error(f"读取 usage 失败: {exc}")
+        return
+    _print_usage(summary, days=days, thread=thread)
+
+
+def handle_export_command(args: str, *, current: str, app=None) -> None:
+    if app is None:
+        render_error("/export 只能在已初始化的图上使用")
+        return
+    parsed = _parse_export_args(args, current=current)
+    if parsed is None:
+        return
+    target, fmt, out_path = parsed
+    try:
+        state = app.get_state({"configurable": {"thread_id": target.thread_id}})
+        values = getattr(state, "values", {}) or {}
+        messages = list(values.get("messages") or [])
+        events = get_persistence().list_audit_events(
+            thread_id=target.thread_id,
+            limit=1000,
+        )
+    except Exception as exc:
+        render_error(f"导出失败: {exc}")
+        return
+
+    if fmt == "json":
+        payload = _thread_export_payload(target, values, messages, events)
+        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    else:
+        text = _thread_export_markdown(target, messages, events)
+
+    if out_path is None:
+        suffix = "json" if fmt == "json" else "md"
+        out_path = Path.cwd() / f"askanswer-{target.thread_id[:8]}.{suffix}"
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+    except Exception as exc:
+        render_error(f"写入导出文件失败: {exc}")
+        return
+    print()
+    print(f"  {C.GREEN}✓ 已导出:{C.RESET} {out_path}")
+    print()
+
+
+def handle_import_command(args: str, *, app=None) -> str | None:
+    if app is None:
+        render_error("/import 只能在已初始化的图上使用")
+        return None
+    parts = _split_args(args)
+    if not parts:
+        print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/import <path.json>{C.RESET}\n")
+        return None
+    path = Path(parts[0]).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        messages = messages_from_dict(payload.get("messages") or [])
+    except Exception as exc:
+        render_error(f"导入失败: {exc}")
+        return None
+    values = dict(payload.get("values") or {})
+    values["messages"] = messages
+    values["pending_shell"] = {}
+    new_id = str(uuid.uuid4())
+    try:
+        try:
+            app.update_state({"configurable": {"thread_id": new_id}}, values, as_node="sorcery")
+        except TypeError:
+            app.update_state({"configurable": {"thread_id": new_id}}, values)
+        meta = payload.get("meta") or {}
+        human_count = sum(1 for m in messages if isinstance(m, HumanMessage))
+        preview = _latest_human_preview(messages)
+        get_persistence().upsert_meta(
+            new_id,
+            title=f"[imported] {meta.get('title') or preview or path.name}"[:120],
+            intent=values.get("intent") or meta.get("last_intent"),
+            model_label=meta.get("model_label") or current_model_label(),
+            preview=preview,
+            message_count=human_count,
+        )
+        imported_events = get_persistence().import_audit_events(
+            payload.get("audit") or [],
+            thread_id=new_id,
+        )
+    except Exception as exc:
+        render_error(f"写入导入会话失败: {exc}")
+        return None
+    print()
+    print(
+        f"  {C.GREEN}✓ 已导入新会话:{C.RESET} "
+        f"{C.CYAN}{new_id[:8]}{C.RESET}  "
+        f"{C.DIM}{len(messages)} messages · {imported_events} audit events{C.RESET}"
+    )
+    print(f"  {C.DIM}已切换到导入的会话。{C.RESET}\n")
+    return new_id
+
+
+def _resolve_thread_or_current(arg: str | None, current: str) -> ThreadMeta | None:
+    token = (arg or "current").strip()
+    if token.lower() in {"", "current", "this", "."}:
+        meta = get_persistence().get_meta(current)
+        if meta is not None:
+            return meta
+        return ThreadMeta(
+            thread_id=current,
+            title=None,
+            created_at=int(time.time()),
+            updated_at=int(time.time()),
+        )
+    return _resolve_thread(token)
+
+
+def _split_args(args: str) -> list[str] | None:
+    try:
+        return shlex.split(args)
+    except ValueError as exc:
+        render_error(f"参数解析失败: {exc}")
+        return None
+
+
+def _parse_nonnegative_int(raw: str) -> int | None:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _print_audit_events(events: list[AuditEvent], target: ThreadMeta) -> None:
+    print()
+    label = target.title or target.preview or target.thread_id[:8]
+    print(f"  {C.BOLD}Audit{C.RESET}  {C.DIM}{_truncate(label, 48)}{C.RESET}")
+    if not events:
+        print(f"  {C.DIM}（暂无审计事件）{C.RESET}\n")
+        return
+    for event in events:
+        detail = event.tool_name or event.model_label or ""
+        if event.input_tokens is not None or event.output_tokens is not None:
+            detail = f"{detail} in={event.input_tokens or 0} out={event.output_tokens or 0}".strip()
+        if event.error:
+            detail = f"{detail} error={_truncate(event.error, 36)}".strip()
+        elif event.args_summary:
+            detail = f"{detail} {_truncate(event.args_summary, 36)}".strip()
+        print(
+            f"   {C.DIM}{_format_ts(event.ts)}{C.RESET}  "
+            f"{C.CYAN}{event.kind:<13}{C.RESET} "
+            f"{C.DIM}{_truncate(detail, 72)}{C.RESET}"
+        )
+    print()
+
+
+def _print_usage(summary: dict, *, days: int, thread: ThreadMeta | None) -> None:
+    print()
+    scope = f"thread {thread.thread_id[:8]}" if thread else "all threads"
+    window = "all time" if days == 0 else f"{days}d"
+    print(f"  {C.BOLD}Usage{C.RESET}  {C.DIM}{scope} · {window}{C.RESET}")
+    models = summary.get("models") or []
+    if models:
+        print(f"   {C.DIM}Models{C.RESET}")
+        for row in models:
+            cost = estimate_cost_usd(
+                row.get("model_label"),
+                row.get("input_tokens"),
+                row.get("output_tokens"),
+            )
+            print(
+                f"    {C.CYAN}{row.get('model_label') or 'unknown':<24}{C.RESET} "
+                f"{C.DIM}{row.get('calls', 0)} calls · "
+                f"in {row.get('input_tokens', 0)} · out {row.get('output_tokens', 0)} · "
+                f"{format_cost(cost)}{C.RESET}"
+            )
+    else:
+        print(f"   {C.DIM}Models: no LLM usage recorded{C.RESET}")
+    tools = summary.get("tools") or []
+    if tools:
+        print(f"   {C.DIM}Tools / events{C.RESET}")
+        for row in tools:
+            print(
+                f"    {C.CYAN}{row.get('name') or 'unknown':<24}{C.RESET} "
+                f"{C.DIM}{row.get('calls', 0)} calls · "
+                f"{row.get('result_size', 0)} chars · "
+                f"errors {row.get('errors', 0)}{C.RESET}"
+            )
+    print()
+
+
+def _parse_export_args(args: str, *, current: str) -> tuple[ThreadMeta, str, Path | None] | None:
+    parts = _split_args(args)
+    if parts is None:
+        return None
+    target_arg = None
+    fmt = "md"
+    out_path = None
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--format" and i + 1 < len(parts):
+            fmt = parts[i + 1].lower()
+            i += 2
+        elif part == "--out" and i + 1 < len(parts):
+            out_path = Path(parts[i + 1]).expanduser()
+            i += 2
+        elif part.startswith("--"):
+            print(f"\n  {C.RED}未知参数：{C.RESET}{part}\n")
+            return None
+        elif target_arg is None:
+            target_arg = part
+            i += 1
+        else:
+            print(f"\n  {C.RED}多余参数：{C.RESET}{part}\n")
+            return None
+    if fmt not in {"md", "json"}:
+        print(f"\n  {C.RED}--format 只能是 md 或 json{C.RESET}\n")
+        return None
+    target = _resolve_thread_or_current(target_arg, current)
+    if target is None:
+        print(f"\n  {C.RED}找不到匹配的会话：{C.RESET}{target_arg}\n")
+        return None
+    return target, fmt, out_path
+
+
+def _thread_export_payload(
+    meta: ThreadMeta,
+    values: dict,
+    messages: list[BaseMessage],
+    events: list[AuditEvent],
+) -> dict:
+    state_values = {
+        key: value
+        for key, value in values.items()
+        if key not in {"messages", "pending_shell"}
+    }
+    return {
+        "version": 1,
+        "thread_id": meta.thread_id,
+        "exported_at": int(time.time()),
+        "meta": asdict(meta),
+        "values": state_values,
+        "messages": messages_to_dict(messages),
+        "audit": [asdict(event) for event in events],
+    }
+
+
+def _thread_export_markdown(
+    meta: ThreadMeta,
+    messages: list[BaseMessage],
+    events: list[AuditEvent],
+) -> str:
+    title = meta.title or meta.preview or meta.thread_id
+    lines = [
+        f"# {title}",
+        "",
+        f"- Thread: `{meta.thread_id}`",
+        f"- Exported: {_format_ts(int(time.time()))}",
+        f"- Messages: {len(messages)}",
+        "",
+        "## Conversation",
+        "",
+    ]
+    for message in messages:
+        role = getattr(message, "type", type(message).__name__)
+        name = getattr(message, "name", None)
+        header = f"### {role}" + (f" · {name}" if name else "")
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        if role == "tool" and len(content) > 1200:
+            content = content[:1200] + "\n\n...(tool output truncated in markdown export)"
+        lines.extend([header, "", content or "_(empty)_", ""])
+    if events:
+        lines.extend(["## Audit Summary", ""])
+        for event in events[:50]:
+            detail = event.tool_name or event.model_label or event.args_summary or ""
+            lines.append(
+                f"- `{_format_ts(event.ts)}` `{event.kind}` "
+                f"{_truncate(detail, 90)}"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _latest_human_preview(messages: list[BaseMessage]) -> str | None:
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            return content.strip().replace("\n", " ")[:80] or None
     return None
 
 

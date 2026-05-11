@@ -28,7 +28,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 
 # 当前自管 schema 版本号；新增列 / 表时把版本号 +1，并在 ``_migrate`` 里追加迁移分支。
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def default_db_path() -> Path:
@@ -57,6 +57,25 @@ class ThreadMeta:
     last_intent: str | None = None
     model_label: str | None = None
     preview: str | None = None   # 最近一条用户消息前 80 字符
+
+
+@dataclass
+class AuditEvent:
+    """``audit_event`` 表的一行。"""
+
+    id: int
+    thread_id: str
+    ts: int
+    kind: str
+    tool_name: str | None = None
+    args_summary: str | None = None
+    result_size: int | None = None
+    model_label: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    duration_ms: int | None = None
+    intent: str | None = None
+    error: str | None = None
 
 
 class PersistenceManager:
@@ -255,8 +274,189 @@ class PersistenceManager:
             cur = self._conn.execute(
                 "DELETE FROM thread_meta WHERE thread_id = ?", (thread_id,)
             )
+            try:
+                self._conn.execute(
+                    "DELETE FROM audit_event WHERE thread_id = ?", (thread_id,)
+                )
+            except sqlite3.OperationalError:
+                pass
             existed = cur.rowcount > 0
         return existed
+
+    def log_audit_event(
+        self,
+        thread_id: str,
+        *,
+        kind: str,
+        ts: int | None = None,
+        tool_name: str | None = None,
+        args_summary: str | None = None,
+        result_size: int | None = None,
+        model_label: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        duration_ms: int | None = None,
+        intent: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """追加一条审计事件。"""
+        if not thread_id or not kind:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO audit_event(
+                    thread_id, ts, kind, tool_name, args_summary, result_size,
+                    model_label, input_tokens, output_tokens, duration_ms,
+                    intent, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    int(ts or time.time()),
+                    kind,
+                    tool_name,
+                    _clip(args_summary, 200) if args_summary is not None else None,
+                    result_size,
+                    model_label,
+                    input_tokens,
+                    output_tokens,
+                    duration_ms,
+                    intent,
+                    _clip(error, 200) if error is not None else None,
+                ),
+            )
+
+    def list_audit_events(
+        self,
+        *,
+        thread_id: str | None = None,
+        limit: int = 50,
+        kind: str | None = None,
+        days: int | None = None,
+    ) -> list[AuditEvent]:
+        """按时间倒序列出审计事件。"""
+        sql = (
+            "SELECT id, thread_id, ts, kind, tool_name, args_summary, result_size, "
+            "model_label, input_tokens, output_tokens, duration_ms, intent, error "
+            "FROM audit_event "
+        )
+        where: list[str] = []
+        params: list = []
+        if thread_id:
+            where.append("thread_id = ?")
+            params.append(thread_id)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        if days and days > 0:
+            where.append("ts >= ?")
+            params.append(int(time.time()) - int(days) * 86400)
+        if where:
+            sql += "WHERE " + " AND ".join(where) + " "
+        sql += "ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_audit(r) for r in rows]
+
+    def usage_summary(
+        self,
+        *,
+        thread_id: str | None = None,
+        days: int | None = None,
+    ) -> dict[str, list[dict]]:
+        """返回模型与工具两个维度的轻量聚合。"""
+        where: list[str] = []
+        params: list = []
+        if thread_id:
+            where.append("thread_id = ?")
+            params.append(thread_id)
+        if days and days > 0:
+            where.append("ts >= ?")
+            params.append(int(time.time()) - int(days) * 86400)
+        clause = "WHERE " + " AND ".join(where) if where else ""
+
+        with self._lock:
+            model_rows = self._conn.execute(
+                f"""
+                SELECT COALESCE(model_label, ''), COUNT(*),
+                       COALESCE(SUM(input_tokens), 0),
+                       COALESCE(SUM(output_tokens), 0),
+                       COALESCE(SUM(duration_ms), 0)
+                FROM audit_event
+                {clause}
+                {"AND" if where else "WHERE"} kind = 'llm_call'
+                GROUP BY COALESCE(model_label, '')
+                ORDER BY COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) DESC
+                """,
+                params,
+            ).fetchall()
+            tool_rows = self._conn.execute(
+                f"""
+                SELECT COALESCE(tool_name, kind), COUNT(*),
+                       COALESCE(SUM(result_size), 0),
+                       COALESCE(SUM(duration_ms), 0),
+                       COALESCE(SUM(CASE WHEN error IS NULL OR error = '' THEN 0 ELSE 1 END), 0)
+                FROM audit_event
+                {clause}
+                {"AND" if where else "WHERE"} kind IN ('tool_call', 'shell_approve', 'shell_reject', 'mcp_connect', 'model_swap')
+                GROUP BY COALESCE(tool_name, kind)
+                ORDER BY 2 DESC
+                """,
+                params,
+            ).fetchall()
+
+        return {
+            "models": [
+                {
+                    "model_label": row[0] or None,
+                    "calls": int(row[1] or 0),
+                    "input_tokens": int(row[2] or 0),
+                    "output_tokens": int(row[3] or 0),
+                    "duration_ms": int(row[4] or 0),
+                }
+                for row in model_rows
+            ],
+            "tools": [
+                {
+                    "name": row[0] or None,
+                    "calls": int(row[1] or 0),
+                    "result_size": int(row[2] or 0),
+                    "duration_ms": int(row[3] or 0),
+                    "errors": int(row[4] or 0),
+                }
+                for row in tool_rows
+            ],
+        }
+
+    def import_audit_events(
+        self,
+        events: list[dict],
+        *,
+        thread_id: str,
+    ) -> int:
+        """把导出的审计事件恢复到新 thread_id 下，返回写入数量。"""
+        count = 0
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            self.log_audit_event(
+                thread_id,
+                ts=_int_or_none(event.get("ts")) or int(time.time()),
+                kind=str(event.get("kind") or "imported"),
+                tool_name=event.get("tool_name"),
+                args_summary=event.get("args_summary"),
+                result_size=_int_or_none(event.get("result_size")),
+                model_label=event.get("model_label"),
+                input_tokens=_int_or_none(event.get("input_tokens")),
+                output_tokens=_int_or_none(event.get("output_tokens")),
+                duration_ms=_int_or_none(event.get("duration_ms")),
+                intent=event.get("intent"),
+                error=event.get("error"),
+            )
+            count += 1
+        return count
 
     def close(self) -> None:
         with self._lock:
@@ -304,6 +504,36 @@ class PersistenceManager:
                 )
                 current = 1
 
+            if current < 2:
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_event (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        thread_id TEXT NOT NULL,
+                        ts INTEGER NOT NULL,
+                        kind TEXT NOT NULL,
+                        tool_name TEXT,
+                        args_summary TEXT,
+                        result_size INTEGER,
+                        model_label TEXT,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        duration_ms INTEGER,
+                        intent TEXT,
+                        error TEXT
+                    )
+                    """
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_thread_ts "
+                    "ON audit_event(thread_id, ts DESC)"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_kind_ts "
+                    "ON audit_event(kind, ts DESC)"
+                )
+                current = 2
+
             # 未来加列 / 加表的迁移分支模板：
             # if current < 2:
             #     self._conn.execute("ALTER TABLE thread_meta ADD COLUMN summary TEXT")
@@ -323,6 +553,22 @@ def _derive_title(preview: str | None) -> str | None:
         return None
     line = preview.strip().splitlines()[0] if preview.strip() else ""
     return line[:30] or None
+
+
+def _clip(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _int_or_none(value) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _row_to_meta(row) -> ThreadMeta:
@@ -354,6 +600,39 @@ def _row_to_meta(row) -> ThreadMeta:
         last_intent=last_intent,
         model_label=model_label,
         preview=preview,
+    )
+
+
+def _row_to_audit(row) -> AuditEvent:
+    (
+        event_id,
+        thread_id,
+        ts,
+        kind,
+        tool_name,
+        args_summary,
+        result_size,
+        model_label,
+        input_tokens,
+        output_tokens,
+        duration_ms,
+        intent,
+        error,
+    ) = row
+    return AuditEvent(
+        id=int(event_id or 0),
+        thread_id=thread_id,
+        ts=int(ts or 0),
+        kind=kind,
+        tool_name=tool_name,
+        args_summary=args_summary,
+        result_size=_int_or_none(result_size),
+        model_label=model_label,
+        input_tokens=_int_or_none(input_tokens),
+        output_tokens=_int_or_none(output_tokens),
+        duration_ms=_int_or_none(duration_ms),
+        intent=intent,
+        error=error,
     )
 
 

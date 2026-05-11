@@ -42,6 +42,14 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
     ("/resume",  "恢复指定会话",           "/resume <序号|id>"),
     ("/title",   "给当前会话命名",         "/title <名字>"),
     ("/delete",  "删除会话",               "/delete <序号|id>"),
+    ("/checkpoints", "列出当前会话快照",   "/checkpoints"),
+    ("/undo",    "回退到上一个快照",       "/undo [n]"),
+    ("/jump",    "跳转到指定快照",         "/jump <index>"),
+    ("/fork",    "从快照分叉新会话",       "/fork [index]"),
+    ("/audit",   "查看审计事件",           "/audit [thread] [--kind k] [--limit n]"),
+    ("/usage",   "查看 token/工具用量",    "/usage [--days n] [--thread id]"),
+    ("/export",  "导出会话",               "/export [thread] [--format md|json] [--out path]"),
+    ("/import",  "导入 JSON 会话",         "/import <path.json>"),
     ("/exit",    "退出 (/quit, /q, Ctrl-D)", "/exit"),
 ]
 

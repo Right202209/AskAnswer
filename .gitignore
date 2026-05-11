@@ -4,6 +4,8 @@ __pycache__/
 *.txt
 .venv/
 .claude/
+.codex
+AGENTS.md
 *.egg-info/
 build/
 dist/
