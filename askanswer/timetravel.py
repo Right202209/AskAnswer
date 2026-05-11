@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -26,9 +27,9 @@ class CheckpointInfo:
 
 def list_checkpoints(app, thread_id: str, *, limit: int = 50) -> list[CheckpointInfo]:
     config = {"configurable": {"thread_id": thread_id}}
-    snapshots = list(app.get_state_history(config))
+    snapshots = list(islice(app.get_state_history(config), limit))
     out: list[CheckpointInfo] = []
-    for index, snapshot in enumerate(snapshots[:limit]):
+    for index, snapshot in enumerate(snapshots):
         values = getattr(snapshot, "values", {}) or {}
         metadata = getattr(snapshot, "metadata", {}) or {}
         messages = values.get("messages") or []

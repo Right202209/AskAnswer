@@ -327,6 +327,49 @@ class PersistenceManager:
                 ),
             )
 
+    def log_audit_events(self, events: list[dict]) -> int:
+        """批量写入审计事件。返回成功写入条数。
+
+        相比 N 次 ``log_audit_event``，这里只取一次锁、跑一个事务，
+        热路径（每个 LLM/tool 调用一条）总开销显著降低。
+        """
+        rows = []
+        for event in events:
+            thread_id = event.get("thread_id")
+            kind = event.get("kind")
+            if not thread_id or not kind:
+                continue
+            args_summary = event.get("args_summary")
+            error = event.get("error")
+            rows.append((
+                thread_id,
+                int(event.get("ts") or time.time()),
+                kind,
+                event.get("tool_name"),
+                _clip(args_summary, 200) if args_summary is not None else None,
+                event.get("result_size"),
+                event.get("model_label"),
+                event.get("input_tokens"),
+                event.get("output_tokens"),
+                event.get("duration_ms"),
+                event.get("intent"),
+                _clip(error, 200) if error is not None else None,
+            ))
+        if not rows:
+            return 0
+        with self._lock, self._conn:
+            self._conn.executemany(
+                """
+                INSERT INTO audit_event(
+                    thread_id, ts, kind, tool_name, args_summary, result_size,
+                    model_label, input_tokens, output_tokens, duration_ms,
+                    intent, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
+
     def list_audit_events(
         self,
         *,

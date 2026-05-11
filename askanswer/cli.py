@@ -30,10 +30,16 @@ from langchain_core.messages import (
     messages_to_dict,
 )
 from langgraph.types import Command
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.padding import Padding
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+from rich.theme import Theme
 
 from .graph import create_search_assistant, draw_search_assistant_mermaid
 from .audit import begin_run, end_run, flush_pending, log_event
@@ -49,15 +55,27 @@ from .persistence import (
 from .pricing import estimate_cost_usd, format_cost
 from .registry import get_registry
 from .schema import ContextSchema
-from .timetravel import fork_thread, list_checkpoints, rewind_to
+from .timetravel import _update_state, fork_thread, list_checkpoints, rewind_to
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 from .ui_input import SLASH_COMMANDS, cmd_meta, make_session, read_line
 from .ui_select import CANCELLED, select_option
 from .ui_spinner import Spinner
 
 
-# rich 控制台：仅用于把最终答案以 Markdown 形式渲染
-_console = Console()
+# rich 控制台：所有 Panel / Table / Markdown 都走它。``Theme`` 是 cli 视觉的
+# 单一真源 —— 调色板调整只动这里一处。``class C`` 是给 print f-string 路径
+# 保留的兼容层，原有调用不强制迁移。
+_THEME = Theme({
+    "brand": "color(214)",      # 主品牌橙
+    "accent": "color(214) bold",
+    "info": "color(117)",       # 命令 / ID / 高亮值
+    "success": "color(114)",    # 成功提示
+    "warning": "color(178)",    # 警告 / 待确认
+    "danger": "color(203)",     # 错误 / 高风险
+    "muted": "color(240)",      # 边框 / 弱化
+    "subtle": "dim",            # 相对调暗
+})
+_console = Console(theme=_THEME, highlight=False)
 
 
 # 缓存最近一次 ``/threads`` 的结果，``/resume <序号>`` / ``/delete <序号>`` 据此寻址。
@@ -135,35 +153,40 @@ def _current_model_name() -> str:
 
 def welcome_box() -> None:
     """启动时画的欢迎面板。"""
-    w = _term_width()
-    inner = w - 4
-    border = "─" * (w - 2)
-    lines = [
-        f"{C.ORANGE}✻{C.RESET} Welcome to {C.BOLD}AskAnswer{C.RESET}!",
-        "",
-        f"{C.DIM}输入 {C.RESET}{C.CYAN}/help{C.RESET}{C.DIM} 查看命令，{C.RESET}"
-        f"{C.CYAN}/exit{C.RESET}{C.DIM} 退出{C.RESET}",
-        "",
-        f"{C.DIM}cwd: {Path.cwd()}{C.RESET}",
-        f"{C.DIM}model: {_current_model_name()}{C.RESET}",
-    ]
-    print()
-    print(f"{C.ORANGE}╭{border}╮{C.RESET}")
-    for line in lines:
-        # 用 _pad 对齐右侧边框，避免 CJK/ANSI 影响列对齐
-        print(f"{C.ORANGE}│{C.RESET} {_pad(line, inner)} {C.ORANGE}│{C.RESET}")
-    print(f"{C.ORANGE}╰{border}╯{C.RESET}")
+    body = Group(
+        Text.from_markup(
+            "[brand]✻[/] Welcome to [bold]AskAnswer[/]!"
+        ),
+        Text(""),
+        Text.from_markup(
+            "[subtle]输入[/] [info]/help[/] [subtle]查看命令，[/]"
+            "[info]/exit[/] [subtle]退出[/]"
+        ),
+        Text(""),
+        Text.from_markup(f"[subtle]cwd:   {Path.cwd()}[/]"),
+        Text.from_markup(f"[subtle]model: {_current_model_name()}[/]"),
+    )
+    _console.print()
+    _console.print(
+        Panel(
+            body,
+            border_style="brand",
+            box=box.ROUNDED,
+            padding=(0, 2),
+            expand=False,
+        )
+    )
 
 
 def tips_block() -> None:
     """欢迎面板下方的“使用小贴士”。"""
-    print()
-    print(f" {C.BOLD}Tips for getting started:{C.RESET}")
-    print()
-    print(f" {C.DIM}1.{C.RESET} 提出任何问题，我会进行搜索并整理答案")
-    print(f" {C.DIM}2.{C.RESET} 问题越具体，结果越精准")
-    print(f" {C.DIM}3.{C.RESET} 输入 {C.CYAN}/help{C.RESET} 查看所有命令")
-    print()
+    _console.print()
+    _console.print(" [bold]Tips for getting started:[/]")
+    _console.print()
+    _console.print(" [subtle]1.[/] 提出任何问题，我会进行搜索并整理答案")
+    _console.print(" [subtle]2.[/] 问题越具体，结果越精准")
+    _console.print(" [subtle]3.[/] 输入 [info]/help[/] 查看所有命令")
+    _console.print()
 
 
 def help_block(target: str | None = None) -> None:
@@ -239,46 +262,67 @@ def mcp_help_block() -> None:
 
 def status_block(thread_id: str) -> None:
     """/status 输出：当前线程 ID、CWD、模型、MCP 连接状态、持久化信息。"""
-    print()
-    print(f" {C.BOLD}Status{C.RESET}")
-    print(f"   {C.DIM}thread:{C.RESET}  {thread_id}")
-    # 当前线程标题（若已命名）
+    # 一对 (label, value) 行；None 值会被跳过
+    rows: list[tuple[str, str]] = [("thread", thread_id)]
     try:
         meta = get_persistence().get_meta(thread_id)
     except Exception:
         meta = None
     if meta and meta.title:
-        print(f"   {C.DIM}title:{C.RESET}   {meta.title}")
-    print(f"   {C.DIM}cwd:{C.RESET}     {Path.cwd()}")
-    print(f"   {C.DIM}model:{C.RESET}   {current_model_label()}")
-    # 持久化信息：DB 路径 + 已存的线程总数
+        rows.append(("title", meta.title))
+    rows.append(("cwd", str(Path.cwd())))
+    rows.append(("model", current_model_label()))
     try:
         pm = get_persistence()
         thread_count = len(pm.list_threads(limit=10000))
-        print(f"   {C.DIM}store:{C.RESET}   {pm.db_path}  {C.DIM}({thread_count} threads){C.RESET}")
+        rows.append(("store", f"{pm.db_path}  [subtle]({thread_count} threads)[/]"))
     except Exception:
         pass
     servers = _mcp_manager().list_servers()
     if servers:
-        # 简洁展示：name(工具数量)，多个 server 用逗号分隔
         summary = ", ".join(f"{s['name']}({s['tools']})" for s in servers)
-        print(f"   {C.DIM}mcp:{C.RESET}     {summary}")
+        rows.append(("mcp", summary))
     else:
-        print(f"   {C.DIM}mcp:{C.RESET}     {C.DIM}（未连接，/mcp <url> 添加）{C.RESET}")
-    print()
+        rows.append(("mcp", "[subtle]（未连接，/mcp <url> 添加）[/]"))
+
+    # 用 Table 做左右两列的等宽对齐，免去手算 padding。
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(style="subtle", justify="right", no_wrap=True)
+    grid.add_column()
+    for label, value in rows:
+        grid.add_row(f"{label}:", value)
+
+    _console.print()
+    _console.print(
+        Panel(
+            grid,
+            title="[bold]Status[/]",
+            title_align="left",
+            border_style="muted",
+            box=box.ROUNDED,
+            padding=(0, 1),
+            expand=False,
+        )
+    )
+    _console.print()
 
 
 # ── Streaming progress ────────────────────────────────────────────
 
 def _marker(title: str, detail: str = "", elapsed: float | None = None) -> str:
-    """生成一行节点进度标记：⏺ Title(detail)  (1.2s)。"""
-    body = f"{C.BOLD}{title}{C.RESET}"
+    """生成一行节点进度标记：⏺ Title    detail  · 1.2s。
+
+    用固定宽度的 title 列对齐多行标记；detail 用 dim 字体次级化，
+    耗时只在 ≥50ms 时显示（条件路由节点几乎瞬时，打耗时没意义）。
+    """
+    # 标题列宽 10 足以容下所有已知节点名（Understand / ShellPlan 最长）
+    head = f"{C.ORANGE}⏺{C.RESET} {C.BOLD}{title:<10}{C.RESET}"
+    parts = [head]
     if detail:
-        body += f"{C.DIM}({detail}){C.RESET}"
+        parts.append(f"{C.DIM}{detail}{C.RESET}")
     if elapsed is not None and elapsed >= 0.05:
-        # ≥50ms 才打耗时，纯条件判断节点（瞬时）就不显示了
-        body += f"  {C.DIM}({elapsed:.1f}s){C.RESET}"
-    return f"  {C.ORANGE}⏺{C.RESET} {body}"
+        parts.append(f"{C.DIM}· {elapsed:.1f}s{C.RESET}")
+    return "  " + "  ".join(parts)
 
 
 # 节点 → spinner 显示文案的映射；未列出的节点用兜底文案。
@@ -332,6 +376,8 @@ def stream_query(
     context = runtime_context or _runtime_context()
     graph_input: object = {"messages": [HumanMessage(content=query)]}
     audit_tokens = begin_run(thread_id)
+    # 缓存一次最终状态，避免 finally 与下文 meta 持久化各 get_state 一次
+    final_state_values: dict | None = None
 
     print()
     spinner = Spinner("理解意图…")
@@ -389,8 +435,8 @@ def stream_query(
         audit_intent = None
         try:
             audit_state = app.get_state(config)
-            audit_values = getattr(audit_state, "values", {}) or {}
-            audit_intent = audit_values.get("intent")
+            final_state_values = getattr(audit_state, "values", {}) or {}
+            audit_intent = final_state_values.get("intent")
         except Exception:
             pass
         flush_pending(thread_id=thread_id, intent=audit_intent)
@@ -399,8 +445,11 @@ def stream_query(
     # 兜底：若节点流里没拿到 final_answer，从 state 里找最后一条消息内容
     if not final_answer:
         try:
-            state = app.get_state({"configurable": {"thread_id": thread_id}})
-            vals = getattr(state, "values", {}) or {}
+            vals = final_state_values
+            if vals is None:
+                state = app.get_state({"configurable": {"thread_id": thread_id}})
+                vals = getattr(state, "values", {}) or {}
+                final_state_values = vals
             final_answer = vals.get("final_answer") or ""
             if not final_answer:
                 msgs = vals.get("messages") or []
@@ -421,8 +470,10 @@ def stream_query(
     # 持久化线程元数据：每次问答后写一行（首次写入会自动取 preview 前 30 字符做 title）。
     # 失败不影响主流程 —— 用户拿到回答比记账更重要。
     try:
-        meta_state = app.get_state(config)
-        meta_values = getattr(meta_state, "values", {}) or {}
+        meta_values = final_state_values
+        if meta_values is None:
+            meta_state = app.get_state(config)
+            meta_values = getattr(meta_state, "values", {}) or {}
         msgs = meta_values.get("messages") or []
         human_count = sum(1 for m in msgs if isinstance(m, HumanMessage))
         preview_text = (query or "").strip().replace("\n", " ")[:80] or None
@@ -469,8 +520,11 @@ def _handle_message_chunk(payload, spinner: Spinner, live_state: dict) -> None:
         live_state["in_tool"] = False
 
     if live_state["live"] is None:
-        # 第一次拿到 user-facing token：让 spinner 让位，启动 Live 渲染
+        # 第一次拿到 user-facing token：让 spinner 让位，启动 Live 渲染。
+        # 在 Live 之前插一条 Rule，把"进度 trace"与"答案正文"在视觉上拆开。
         spinner.stop()
+        _console.print()
+        _console.print(Rule(title="[subtle]Answer[/]", style="muted", align="left"))
         live = Live(
             Padding(Markdown(""), (0, 2)),
             console=_console,
@@ -678,17 +732,18 @@ def _read_more_prompt() -> str:
 
 def render_answer(answer: str) -> None:
     """把最终答案以 Markdown 渲染输出。"""
-    print()
+    _console.print()
+    _console.print(Rule(title="[subtle]Answer[/]", style="muted", align="left"))
     _console.print(Padding(Markdown(answer or "_(空答案)_"), (0, 2)))
-    print()
+    _console.print()
 
 
 def render_error(message: str) -> None:
     """统一的错误样式：红色叉号 + 灰色细节。"""
-    print()
-    print(f"  {C.RED}✗ 运行失败{C.RESET}")
-    print(f"  {C.DIM}{message}{C.RESET}")
-    print()
+    _console.print()
+    _console.print("  [danger]✗ 运行失败[/]")
+    _console.print(f"  [subtle]{message}[/]")
+    _console.print()
 
 
 # ── Bang shell shortcut ───────────────────────────────────────────
@@ -960,37 +1015,62 @@ def _remove_mcp_server(name: str) -> None:
 def _print_mcp_servers() -> None:
     """打印已连接的 MCP 服务清单。"""
     servers = _mcp_manager().list_servers()
-    print()
+    _console.print()
     if not servers:
-        print(f"  {C.DIM}（暂未连接 MCP 服务）{C.RESET}")
-        print()
+        _console.print("  [subtle]（暂未连接 MCP 服务）[/]")
+        _console.print()
         return
-    print(f"  {C.BOLD}MCP Servers ({len(servers)}){C.RESET}")
+    _console.print(f"  [bold]MCP Servers ({len(servers)})[/]")
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="subtle",
+        border_style="muted",
+        padding=(0, 1),
+        expand=False,
+    )
+    table.add_column("", width=1, no_wrap=True)
+    table.add_column("name", style="info", no_wrap=True)
+    table.add_column("transport", style="subtle", no_wrap=True)
+    table.add_column("tools", justify="right", style="subtle", no_wrap=True)
+    table.add_column("url", style="subtle", no_wrap=True, overflow="ellipsis", max_width=46)
     for s in servers:
-        print(
-            f"   {C.GREEN}●{C.RESET} {C.BOLD}{s['name']}{C.RESET}  "
-            f"{C.DIM}{s['transport']} · {s['tools']} tools{C.RESET}"
+        table.add_row(
+            "[success]●[/]",
+            s["name"],
+            s["transport"],
+            str(s["tools"]),
+            s.get("url") or "",
         )
-        if s.get("url"):
-            print(f"     {C.DIM}{s['url']}{C.RESET}")
-    print()
+    _console.print(table)
+    _console.print()
 
 
 def _print_mcp_tools(server: str | None) -> None:
     """打印某个 server（或全部 server）下的工具列表。"""
     tools = _mcp_manager().list_tools(server=server)
-    print()
+    _console.print()
     if not tools:
         hint = f"{server} 无工具 / 未连接" if server else "暂无 MCP 工具，使用 /mcp <url> 添加"
-        print(f"  {C.DIM}（{hint}）{C.RESET}")
-        print()
+        _console.print(f"  [subtle]（{hint}）[/]")
+        _console.print()
         return
     scope = f" ({server})" if server else ""
-    print(f"  {C.BOLD}MCP Tools{scope} · {len(tools)}{C.RESET}")
+    _console.print(f"  [bold]MCP Tools{scope} · {len(tools)}[/]")
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="subtle",
+        border_style="muted",
+        padding=(0, 1),
+        expand=False,
+    )
+    table.add_column("name", style="info", no_wrap=True)
+    table.add_column("description", style="subtle", no_wrap=True, overflow="ellipsis", max_width=60)
     for t in tools:
-        desc = _truncate(t.get("description") or "", 56)
-        print(f"    {C.CYAN}{t['name']}{C.RESET}  {C.DIM}{desc}{C.RESET}")
-    print()
+        table.add_row(t["name"], t.get("description") or "")
+    _console.print(table)
+    _console.print()
 
 
 # ── Threads / Resume / Title / Delete ─────────────────────────────────
@@ -1060,37 +1140,53 @@ def handle_threads_command(args: str, *, current: str) -> None:
         return
     _LAST_LIST = threads
 
-    print()
+    _console.print()
     if not threads:
         hint = f"无匹配 '{keyword}'" if keyword else "暂无历史会话（先聊几句吧）"
-        print(f"  {C.DIM}（{hint}）{C.RESET}")
-        print()
+        _console.print(f"  [subtle]（{hint}）[/]")
+        _console.print()
         return
 
-    title_word = f" · 关键词: {keyword}" if keyword else ""
-    print(f"  {C.BOLD}Threads ({len(threads)}){title_word}{C.RESET}")
-    for i, m in enumerate(threads, 1):
-        marker = f"{C.GREEN}●{C.RESET}" if m.thread_id == current else " "
-        # 选 title 优先，其次 preview，否则给个占位
-        text = (m.title or m.preview or "(空)").strip().replace("\n", " ")
-        text = _truncate(text, 50)
-        intent = (m.last_intent or "—")[:8]
-        print(
-            f"  {marker} {C.DIM}{i:>2}.{C.RESET} "
-            f"{C.CYAN}{m.thread_id[:8]}{C.RESET}  "
-            f"{C.DIM}{_format_ts(m.updated_at)}{C.RESET}  "
-            f"{C.DIM}{intent:<8}{C.RESET} "
-            f"{C.DIM}{m.message_count}msg{C.RESET}  "
-            f"{text}"
-        )
-    print()
-    print(
-        f"  {C.DIM}用法：{C.RESET}"
-        f"{C.CYAN}/resume <序号|id>{C.RESET}{C.DIM} 恢复 · {C.RESET}"
-        f"{C.CYAN}/title <名字>{C.RESET}{C.DIM} 命名当前 · {C.RESET}"
-        f"{C.CYAN}/delete <序号|id>{C.RESET}{C.DIM} 删除{C.RESET}"
+    title_word = f"  [subtle]· 关键词: {keyword}[/]" if keyword else ""
+    _console.print(f"  [bold]Threads ({len(threads)})[/]{title_word}")
+
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="subtle",
+        border_style="muted",
+        padding=(0, 1),
+        expand=True,
     )
-    print()
+    table.add_column("", width=1, no_wrap=True)
+    table.add_column("#", justify="right", style="subtle", no_wrap=True, width=3)
+    table.add_column("id", style="info", no_wrap=True, width=8)
+    table.add_column("updated", style="subtle", no_wrap=True, width=11)
+    table.add_column("intent", style="subtle", no_wrap=True, width=8)
+    table.add_column("msgs", justify="right", style="subtle", no_wrap=True, width=4)
+    table.add_column("title / preview", no_wrap=True, overflow="ellipsis", ratio=1)
+
+    for i, m in enumerate(threads, 1):
+        marker = "[success]●[/]" if m.thread_id == current else " "
+        text = (m.title or m.preview or "(空)").strip().replace("\n", " ")
+        intent = (m.last_intent or "—")[:8]
+        table.add_row(
+            marker,
+            str(i),
+            m.thread_id[:8],
+            _format_ts(m.updated_at),
+            intent,
+            f"{m.message_count}",
+            text,
+        )
+    _console.print(table)
+    _console.print(
+        "  [subtle]用法：[/]"
+        "[info]/resume <序号|id>[/][subtle] 恢复 · [/]"
+        "[info]/title <名字>[/][subtle] 命名当前 · [/]"
+        "[info]/delete <序号|id>[/][subtle] 删除[/]"
+    )
+    _console.print()
 
 
 def handle_resume_command(args: str, *, current: str, app=None) -> str | None:
@@ -1251,28 +1347,50 @@ def handle_checkpoints_command(args: str, *, thread_id: str, app=None) -> None:
         render_error(f"读取 checkpoints 失败: {exc}")
         return
 
-    print()
+    _console.print()
     if not checkpoints:
-        print(f"  {C.DIM}（当前会话暂无 checkpoints）{C.RESET}\n")
+        _console.print("  [subtle]（当前会话暂无 checkpoints）[/]")
+        _console.print()
         return
-    print(f"  {C.BOLD}Checkpoints ({len(checkpoints)}){C.RESET}")
-    for cp in checkpoints:
-        latest = " latest" if cp.index == 0 else ""
-        pending = f" {C.GOLD}pending-shell{C.RESET}" if cp.pending_shell else ""
-        print(
-            f"   {C.DIM}#{cp.index:<2}{C.RESET} "
-            f"{C.CYAN}{cp.node:<12}{C.RESET} "
-            f"{C.DIM}{_format_ts(cp.created_at)}{C.RESET}  "
-            f"{C.DIM}{cp.message_count} msgs · step={cp.step}{latest}{C.RESET}{pending}"
-        )
-    print()
-    print(
-        f"  {C.DIM}用法：{C.RESET}"
-        f"{C.CYAN}/undo [n]{C.RESET}{C.DIM} 回到第 n 个历史点 · {C.RESET}"
-        f"{C.CYAN}/jump <index>{C.RESET}{C.DIM} 显式跳转 · {C.RESET}"
-        f"{C.CYAN}/fork [index]{C.RESET}{C.DIM} 分叉新会话{C.RESET}"
+    _console.print(f"  [bold]Checkpoints ({len(checkpoints)})[/]")
+
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="subtle",
+        border_style="muted",
+        padding=(0, 1),
+        expand=False,
     )
-    print()
+    table.add_column("#", justify="right", style="subtle", no_wrap=True)
+    table.add_column("node", style="info", no_wrap=True)
+    table.add_column("created", style="subtle", no_wrap=True)
+    table.add_column("msgs", justify="right", style="subtle", no_wrap=True)
+    table.add_column("step", style="subtle", no_wrap=True)
+    table.add_column("flags", no_wrap=True)
+
+    for cp in checkpoints:
+        flags = []
+        if cp.index == 0:
+            flags.append("[success]latest[/]")
+        if cp.pending_shell:
+            flags.append("[warning]pending-shell[/]")
+        table.add_row(
+            str(cp.index),
+            cp.node,
+            _format_ts(cp.created_at),
+            str(cp.message_count),
+            cp.step,
+            " ".join(flags),
+        )
+    _console.print(table)
+    _console.print(
+        "  [subtle]用法：[/]"
+        "[info]/undo [n][/][subtle] 回到第 n 个历史点 · [/]"
+        "[info]/jump <index>[/][subtle] 显式跳转 · [/]"
+        "[info]/fork [index][/][subtle] 分叉新会话[/]"
+    )
+    _console.print()
 
 
 def handle_undo_command(args: str, *, thread_id: str, app=None) -> None:
@@ -1474,10 +1592,7 @@ def handle_import_command(args: str, *, app=None) -> str | None:
     values["pending_shell"] = {}
     new_id = str(uuid.uuid4())
     try:
-        try:
-            app.update_state({"configurable": {"thread_id": new_id}}, values, as_node="sorcery")
-        except TypeError:
-            app.update_state({"configurable": {"thread_id": new_id}}, values)
+        _update_state(app, {"configurable": {"thread_id": new_id}}, values)
         meta = payload.get("meta") or {}
         human_count = sum(1 for m in messages if isinstance(m, HumanMessage))
         preview = _latest_human_preview(messages)
@@ -1538,61 +1653,120 @@ def _parse_nonnegative_int(raw: str) -> int | None:
 
 
 def _print_audit_events(events: list[AuditEvent], target: ThreadMeta) -> None:
-    print()
+    _console.print()
     label = target.title or target.preview or target.thread_id[:8]
-    print(f"  {C.BOLD}Audit{C.RESET}  {C.DIM}{_truncate(label, 48)}{C.RESET}")
+    _console.print(
+        f"  [bold]Audit[/]  [subtle]{_truncate(label, 48)}[/]"
+    )
     if not events:
-        print(f"  {C.DIM}（暂无审计事件）{C.RESET}\n")
+        _console.print("  [subtle]（暂无审计事件）[/]")
+        _console.print()
         return
+
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="subtle",
+        border_style="muted",
+        padding=(0, 1),
+        expand=True,
+    )
+    table.add_column("time", style="subtle", no_wrap=True, width=11)
+    table.add_column("kind", style="info", no_wrap=True, width=13)
+    table.add_column("target", style="subtle", no_wrap=True, width=18, overflow="ellipsis")
+    table.add_column("tokens", style="subtle", justify="right", no_wrap=True, width=16)
+    table.add_column("detail", no_wrap=True, overflow="ellipsis", ratio=1)
+
     for event in events:
-        detail = event.tool_name or event.model_label or ""
+        target_text = event.tool_name or event.model_label or ""
         if event.input_tokens is not None or event.output_tokens is not None:
-            detail = f"{detail} in={event.input_tokens or 0} out={event.output_tokens or 0}".strip()
+            tokens = f"in={event.input_tokens or 0} out={event.output_tokens or 0}"
+        else:
+            tokens = ""
         if event.error:
-            detail = f"{detail} error={_truncate(event.error, 36)}".strip()
-        elif event.args_summary:
-            detail = f"{detail} {_truncate(event.args_summary, 36)}".strip()
-        print(
-            f"   {C.DIM}{_format_ts(event.ts)}{C.RESET}  "
-            f"{C.CYAN}{event.kind:<13}{C.RESET} "
-            f"{C.DIM}{_truncate(detail, 72)}{C.RESET}"
+            detail = f"[danger]error:[/] {event.error}"
+        else:
+            detail = event.args_summary or ""
+        table.add_row(
+            _format_ts(event.ts),
+            event.kind,
+            target_text,
+            tokens,
+            detail,
         )
-    print()
+    _console.print(table)
+    _console.print()
 
 
 def _print_usage(summary: dict, *, days: int, thread: ThreadMeta | None) -> None:
-    print()
+    _console.print()
     scope = f"thread {thread.thread_id[:8]}" if thread else "all threads"
     window = "all time" if days == 0 else f"{days}d"
-    print(f"  {C.BOLD}Usage{C.RESET}  {C.DIM}{scope} · {window}{C.RESET}")
+    _console.print(f"  [bold]Usage[/]  [subtle]{scope} · {window}[/]")
+
     models = summary.get("models") or []
     if models:
-        print(f"   {C.DIM}Models{C.RESET}")
+        m_table = Table(
+            box=box.SIMPLE_HEAD,
+            show_header=True,
+            header_style="subtle",
+            border_style="muted",
+            padding=(0, 1),
+            expand=False,
+            title="Models",
+            title_style="subtle",
+            title_justify="left",
+        )
+        m_table.add_column("model", style="info", no_wrap=True, max_width=28, overflow="ellipsis")
+        m_table.add_column("calls", justify="right", style="subtle", no_wrap=True)
+        m_table.add_column("in", justify="right", style="subtle", no_wrap=True)
+        m_table.add_column("out", justify="right", style="subtle", no_wrap=True)
+        m_table.add_column("cost", justify="right", no_wrap=True)
         for row in models:
             cost = estimate_cost_usd(
                 row.get("model_label"),
                 row.get("input_tokens"),
                 row.get("output_tokens"),
             )
-            print(
-                f"    {C.CYAN}{row.get('model_label') or 'unknown':<24}{C.RESET} "
-                f"{C.DIM}{row.get('calls', 0)} calls · "
-                f"in {row.get('input_tokens', 0)} · out {row.get('output_tokens', 0)} · "
-                f"{format_cost(cost)}{C.RESET}"
+            m_table.add_row(
+                row.get("model_label") or "unknown",
+                f"{row.get('calls', 0)}",
+                f"{row.get('input_tokens', 0)}",
+                f"{row.get('output_tokens', 0)}",
+                format_cost(cost),
             )
+        _console.print(m_table)
     else:
-        print(f"   {C.DIM}Models: no LLM usage recorded{C.RESET}")
+        _console.print("  [subtle]Models: no LLM usage recorded[/]")
+
     tools = summary.get("tools") or []
     if tools:
-        print(f"   {C.DIM}Tools / events{C.RESET}")
+        t_table = Table(
+            box=box.SIMPLE_HEAD,
+            show_header=True,
+            header_style="subtle",
+            border_style="muted",
+            padding=(0, 1),
+            expand=False,
+            title="Tools / events",
+            title_style="subtle",
+            title_justify="left",
+        )
+        t_table.add_column("name", style="info", no_wrap=True, max_width=28, overflow="ellipsis")
+        t_table.add_column("calls", justify="right", style="subtle", no_wrap=True)
+        t_table.add_column("chars", justify="right", style="subtle", no_wrap=True)
+        t_table.add_column("errors", justify="right", no_wrap=True)
         for row in tools:
-            print(
-                f"    {C.CYAN}{row.get('name') or 'unknown':<24}{C.RESET} "
-                f"{C.DIM}{row.get('calls', 0)} calls · "
-                f"{row.get('result_size', 0)} chars · "
-                f"errors {row.get('errors', 0)}{C.RESET}"
+            err = row.get("errors", 0)
+            err_text = f"[danger]{err}[/]" if err else "[subtle]0[/]"
+            t_table.add_row(
+                row.get("name") or "unknown",
+                f"{row.get('calls', 0)}",
+                f"{row.get('result_size', 0)}",
+                err_text,
             )
-    print()
+        _console.print(t_table)
+    _console.print()
 
 
 def _parse_export_args(args: str, *, current: str) -> tuple[ThreadMeta, str, Path | None] | None:

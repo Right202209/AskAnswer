@@ -97,14 +97,16 @@ def flush_pending(*, thread_id: str | None = None, intent: str | None = None) ->
     pending = _PENDING.get()
     if not pending:
         return 0
-    count = 0
     for event in pending:
         if thread_id:
             event["thread_id"] = thread_id
         if intent and not event.get("intent"):
             event["intent"] = intent
-        _persist(event)
-        count += 1
+    try:
+        count = get_persistence().log_audit_events(pending)
+    except Exception:
+        # Audit must never break the user-facing answer path.
+        count = 0
     pending.clear()
     return count
 
@@ -178,32 +180,12 @@ def with_llm_audit_callback(config: Any, *, model_label: str) -> dict:
 
 
 def _extract_usage(response) -> tuple[int | None, int | None]:
-    """Best-effort extraction across LangChain provider variants."""
-    candidates: list[dict] = []
-    llm_output = getattr(response, "llm_output", None)
-    if isinstance(llm_output, dict):
-        for key in ("token_usage", "usage", "usage_metadata"):
-            value = llm_output.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
+    """Best-effort extraction across LangChain provider variants.
 
-    generations = getattr(response, "generations", None) or []
-    for group in generations:
-        for generation in group or []:
-            message = getattr(generation, "message", None)
-            if message is None:
-                continue
-            usage = getattr(message, "usage_metadata", None)
-            if isinstance(usage, dict):
-                candidates.append(usage)
-            metadata = getattr(message, "response_metadata", None)
-            if isinstance(metadata, dict):
-                for key in ("token_usage", "usage", "usage_metadata"):
-                    value = metadata.get(key)
-                    if isinstance(value, dict):
-                        candidates.append(value)
-
-    for usage in candidates:
+    Iterates candidates lazily so a provider that puts usage in ``llm_output``
+    doesn't pay the cost of scanning every generation message.
+    """
+    for usage in _candidate_usages(response):
         input_tokens = _first_int(
             usage,
             "input_tokens",
@@ -221,6 +203,31 @@ def _extract_usage(response) -> tuple[int | None, int | None]:
         if input_tokens is not None or output_tokens is not None:
             return input_tokens, output_tokens
     return None, None
+
+
+def _candidate_usages(response):
+    """Yield usage dicts in priority order: top-level llm_output, then per-generation."""
+    llm_output = getattr(response, "llm_output", None)
+    if isinstance(llm_output, dict):
+        for key in ("token_usage", "usage", "usage_metadata"):
+            value = llm_output.get(key)
+            if isinstance(value, dict):
+                yield value
+
+    for group in getattr(response, "generations", None) or ():
+        for generation in group or ():
+            message = getattr(generation, "message", None)
+            if message is None:
+                continue
+            usage = getattr(message, "usage_metadata", None)
+            if isinstance(usage, dict):
+                yield usage
+            metadata = getattr(message, "response_metadata", None)
+            if isinstance(metadata, dict):
+                for key in ("token_usage", "usage", "usage_metadata"):
+                    value = metadata.get(key)
+                    if isinstance(value, dict):
+                        yield value
 
 
 def _first_int(mapping: dict, *keys: str) -> int | None:
