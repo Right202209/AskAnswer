@@ -140,58 +140,52 @@ class PersistenceManager:
         - title：仅在首次插入时若未显式给出，则从 preview 截 30 字符兜底；
           后续调用若 title=None 则保留旧值（不被覆盖）。
         - 其它字段：None 表示“不动”，非 None 表示“覆盖”。
-        - updated_at 每次都刷新到当前时间。
+        - updated_at 取 max(now, 旧值)，避免跨进程时钟回退导致排序异常。
+        - created_at 仅 INSERT 阶段写入；UPDATE 分支不动它。
+
+        以单条 SQLite UPSERT 完成（``INSERT … ON CONFLICT … DO UPDATE``），
+        消除了 “SELECT 1 → INSERT/UPDATE” 的逻辑竞争窗口：多进程同 thread
+        高频写入时不会丢 title/preview 或抛 UNIQUE 约束错误。
+        ``title`` 和 ``message_count`` 在 INSERT 和 UPDATE 两条分支语义不同
+        （INSERT 走默认值；UPDATE 走 “None 即保留”），因此各自单独绑定。
         """
         now = int(time.time())
+        # INSERT 分支的 title 默认值：未显式给出时回退到 preview 派生。
+        # UPDATE 分支必须使用原始 title（可能是 None），否则首次派生的标题
+        # 会在后续调用上把已存在的好标题覆盖掉。
+        insert_title = title if title is not None else _derive_title(preview)
+        insert_count = int(message_count or 0)
+        update_count = int(message_count) if message_count is not None else None
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT 1 FROM thread_meta WHERE thread_id = ?",
-                (thread_id,),
-            ).fetchone()
-            if row is None:
-                final_title = title or _derive_title(preview)
-                self._conn.execute(
-                    """
-                    INSERT INTO thread_meta(
-                        thread_id, title, tags, created_at, updated_at,
-                        message_count, last_intent, model_label, preview
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        thread_id,
-                        final_title,
-                        json.dumps([]),
-                        now,
-                        now,
-                        int(message_count or 0),
-                        intent,
-                        model_label,
-                        preview,
-                    ),
-                )
-            else:
-                # COALESCE(?, col)：传入 NULL 时保留旧值，非 NULL 时覆盖
-                self._conn.execute(
-                    """
-                    UPDATE thread_meta
-                    SET title         = COALESCE(?, title),
-                        last_intent   = COALESCE(?, last_intent),
-                        model_label   = COALESCE(?, model_label),
-                        preview       = COALESCE(?, preview),
-                        message_count = COALESCE(?, message_count),
-                        updated_at    = ?
-                    WHERE thread_id = ?
-                    """,
-                    (
-                        title,
-                        intent,
-                        model_label,
-                        preview,
-                        message_count,
-                        now,
-                        thread_id,
-                    ),
-                )
+            self._conn.execute(
+                """
+                INSERT INTO thread_meta(
+                    thread_id, title, tags, created_at, updated_at,
+                    message_count, last_intent, model_label, preview
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    title         = COALESCE(?, thread_meta.title),
+                    last_intent   = COALESCE(excluded.last_intent, thread_meta.last_intent),
+                    model_label   = COALESCE(excluded.model_label, thread_meta.model_label),
+                    preview       = COALESCE(excluded.preview, thread_meta.preview),
+                    message_count = COALESCE(?, thread_meta.message_count),
+                    updated_at    = MAX(excluded.updated_at, thread_meta.updated_at)
+                """,
+                (
+                    thread_id,
+                    insert_title,
+                    json.dumps([]),
+                    now,
+                    now,
+                    insert_count,
+                    intent,
+                    model_label,
+                    preview,
+                    # DO UPDATE 分支专用绑定：raw title / raw message_count
+                    title,
+                    update_count,
+                ),
+            )
 
     def list_threads(
         self,
