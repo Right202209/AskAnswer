@@ -121,9 +121,9 @@ class _FilteredFileHistory(FileHistory):
         super().store_string(string)
 
 
-# 整体配色：橙色提示符 + 灰白底栏 + 高亮当前补全项
+# 整体配色：muted 边框 + brand 提示符 + 灰白底栏 + 高亮当前补全项
 _PROMPT_STYLE = Style.from_dict({
-    "prompt.border":      "#ffaf00",
+    "prompt.border":      "#878787",
     "prompt.gt":          "#ffaf00 bold",
     "bottom-toolbar":     "#878787 bg:default",
     "bottom-toolbar.dot": "#5fd787",
@@ -149,13 +149,61 @@ def make_session(get_status: Callable[[], list[tuple[str, str]]]) -> PromptSessi
     """
 
     def bottom_toolbar():
-        items = get_status()
-        parts: list[tuple[str, str]] = [("class:bottom-toolbar.dot", " ● ")]
-        for i, (label, value) in enumerate(items):
-            if i > 0:
-                parts.append(("class:bottom-toolbar", "  ·  "))
-            parts.append(("class:bottom-toolbar.lbl", f"{label}: "))
-            parts.append(("class:bottom-toolbar.val", str(value)))
+        items_map = dict(get_status())
+        try:
+            cols = os.get_terminal_size().columns
+        except OSError:
+            cols = 80
+
+        # 三段：左 model / 中 mcp / 右 thread。宽度不够时按右→中→左丢弃。
+        def seg(label: str, value: str) -> tuple[list[tuple[str, str]], int]:
+            text_parts = [
+                ("class:bottom-toolbar.lbl", f"{label}:"),
+                ("class:bottom-toolbar.val", value),
+            ]
+            return text_parts, len(label) + 1 + len(value)
+
+        left_parts, left_w = seg("model", str(items_map.get("model") or "—"))
+        mcp_val = items_map.get("mcp")
+        if mcp_val:
+            mid_parts, mid_w = seg("mcp", f"{mcp_val} tools")
+        else:
+            mid_parts, mid_w = None, 0
+        right_parts, right_w = seg("thread", str(items_map.get("thread") or "?"))
+
+        prefix = " ● "
+        available = max(cols - len(prefix), 1)
+        gap_min = 2
+
+        show_mid = mid_parts is not None
+        show_right = True
+        needed_all = left_w + mid_w + right_w + (gap_min * (2 if show_mid else 1))
+        if available < needed_all:
+            show_right = False
+        if show_mid and available < left_w + mid_w + gap_min:
+            show_mid = False
+
+        parts: list[tuple[str, str]] = [("class:bottom-toolbar.dot", prefix)]
+        parts.extend(left_parts)
+        used = left_w
+
+        if show_mid and show_right:
+            # 中段居中，右段贴右
+            mid_start = max((available - mid_w) // 2, used + gap_min)
+            right_start = max(available - right_w, mid_start + mid_w + gap_min)
+            parts.append(("class:bottom-toolbar", " " * (mid_start - used)))
+            parts.extend(mid_parts)
+            used = mid_start + mid_w
+            parts.append(("class:bottom-toolbar", " " * (right_start - used)))
+            parts.extend(right_parts)
+        elif show_right:
+            right_start = max(available - right_w, used + gap_min)
+            parts.append(("class:bottom-toolbar", " " * (right_start - used)))
+            parts.extend(right_parts)
+        elif show_mid:
+            parts.append(("class:bottom-toolbar", " " * gap_min))
+            parts.extend(mid_parts)
+
         return parts
 
     bindings = KeyBindings()
@@ -187,10 +235,10 @@ def read_line(
     """
     global _last_interrupt_ts
 
-    # 主输入行的提示符：``│ > ``，用 FormattedText 让边框/箭头单独着色
+    # 主输入行的提示符：``│ ❯ ``，用 FormattedText 让边框/箭头单独着色
     main_prompt = FormattedText([
         ("class:prompt.border", "│ "),
-        ("class:prompt.gt",     "> "),
+        ("class:prompt.gt",     "❯ "),
     ])
     cont_prompt = FormattedText([
         ("class:prompt.border", "│ "),

@@ -151,29 +151,76 @@ def _current_model_name() -> str:
     return type(model).__name__
 
 
-def welcome_box() -> None:
-    """启动时画的欢迎面板。"""
-    body = Group(
-        Text.from_markup(
-            "[brand]✻[/] Welcome to [bold]AskAnswer[/]!"
-        ),
-        Text(""),
-        Text.from_markup(
-            "[subtle]输入[/] [info]/help[/] [subtle]查看命令，[/]"
-            "[info]/exit[/] [subtle]退出[/]"
-        ),
-        Text(""),
-        Text.from_markup(f"[subtle]cwd:   {Path.cwd()}[/]"),
-        Text.from_markup(f"[subtle]model: {_current_model_name()}[/]"),
+def _welcome_info(thread_id: str | None) -> str:
+    """右下角小字：`model · mcp:N · thread:abcd123`。"""
+    parts = [_current_model_name()]
+    try:
+        n = len(_mcp_manager().list_servers())
+    except Exception:
+        n = 0
+    parts.append(f"mcp:{n}")
+    if thread_id:
+        parts.append(f"thread:{thread_id[:7]}")
+    return " · ".join(parts)
+
+
+def welcome_box(thread_id: str | None = None) -> None:
+    """启动时画的欢迎面板。
+
+    终端宽度 < 80 列：降级到纯文字（单列），避免折行/裁剪难看。
+    >= 80 列：圆角面板，右下角放 model · mcp · thread 一行小字。
+    """
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 80
+    info_line = _welcome_info(thread_id)
+
+    # 窄终端：直接打几行字，不上面板
+    if cols < 80:
+        _console.print()
+        _console.print("[brand]✻[/] [accent]AskAnswer[/]")
+        _console.print("[muted]AI 助手 · 输入 /help 查看命令, /exit 退出[/]")
+        _console.print(f"[muted]cwd: {Path.cwd()}[/]")
+        if info_line:
+            _console.print(f"[muted]{info_line}[/]")
+        _console.print()
+        return
+
+    grid = Table.grid(expand=True)
+    grid.add_column(ratio=1)
+    grid.add_column(no_wrap=True, justify="right")
+
+    grid.add_row(
+        Text.from_markup("[brand]✻[/] [accent]AskAnswer[/]"),
+        "",
     )
+    grid.add_row(
+        Text.from_markup("[muted]AI assistant · LangGraph powered[/]"),
+        "",
+    )
+    grid.add_row("", "")
+    grid.add_row(
+        Text.from_markup(
+            "[muted]输入[/] [info]/help[/] [muted]查看命令, [/]"
+            "[info]/exit[/] [muted]退出[/]"
+        ),
+        "",
+    )
+    grid.add_row("", "")
+    grid.add_row(
+        Text.from_markup(f"[muted]cwd: {Path.cwd()}[/]"),
+        Text.from_markup(f"[muted]{info_line}[/]") if info_line else "",
+    )
+
     _console.print()
     _console.print(
         Panel(
-            body,
+            grid,
             border_style="brand",
             box=box.ROUNDED,
             padding=(0, 2),
-            expand=False,
+            width=min(cols - 2, 100),
         )
     )
 
@@ -868,7 +915,7 @@ def _build_status_provider(thread_box: list[str]):
     """
     def get_status() -> list[tuple[str, str]]:
         items: list[tuple[str, str]] = [
-            ("thread", (thread_box[0] or "?")[:8]),
+            ("thread", (thread_box[0] or "?")[:7]),
             ("model",  current_model_label() or "—"),
         ]
         try:
@@ -885,14 +932,12 @@ def _build_status_provider(thread_box: list[str]):
 def _draw_top_border() -> None:
     """与 prompt_toolkit 输入区配套的视觉上边框；下边框由 ``_draw_bottom_border`` 收尾。"""
     w = _term_width()
-    border = "─" * (w - 2)
-    print(f"{C.ORANGE}╭{border}╮{C.RESET}")
+    _console.print(f"[muted]╭{'─' * (w - 2)}╮[/]")
 
 
 def _draw_bottom_border() -> None:
     w = _term_width()
-    border = "─" * (w - 2)
-    print(f"{C.ORANGE}╰{border}╯{C.RESET}")
+    _console.print(f"[muted]╰{'─' * (w - 2)}╯[/]")
 
 
 def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
@@ -916,8 +961,8 @@ def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
         # 用户可用 /threads 查看 / /resume 恢复 / /delete 删除。
         old_short = thread_id[:8]
         os.system("cls" if os.name == "nt" else "clear")
-        welcome_box()
         thread_id = str(uuid.uuid4())
+        welcome_box(thread_id)
         print(
             f"\n  {C.DIM}已开始新会话：{thread_id[:8]}…  "
             f"上一段保留为 {old_short}…（/threads 查看 · /delete 删除）{C.RESET}\n"
@@ -1955,7 +2000,7 @@ def interactive_loop(app) -> int:
     thread_box: list[str] = [str(uuid.uuid4())]
     session = make_session(_build_status_provider(thread_box))
 
-    welcome_box()
+    welcome_box(thread_box[0])
     tips_block()
 
     while True:
