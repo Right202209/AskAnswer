@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Sections
 
-- [Commands & Required env](.claude/mem/commands.md) — install, run, env vars (`OPENAI_API_KEY`, `TAVILY_API_KEY`, `ASKANSWER_DB_PATH`, …)
-- [Architecture — Orchestration](.claude/mem/architecture-orchestration.md) — main graph topology, `SearchState`, `ContextSchema`, parent nodes, react subgraph, HITL shell
-- [Architecture — Extensibility](.claude/mem/architecture-extensibility.md) — `IntentHandler` protocol + `IntentRegistry`, `ToolRegistry` tags & confirmation classes
-- [Architecture — Subgraphs as tools](.claude/mem/architecture-subgraphs.md) — SQL agent and Helix spec-loop, both exposed via the tool registry
-- [Architecture — Runtime services](.claude/mem/architecture-runtime.md) — MCP client manager, SQLite persistence, CLI/REPL, `_ModelProxy` swap
-- [Conventions](.claude/mem/conventions.md) — partial-dict returns, lazy persistence, registry-only tools, intent extension rules
-- [What's documented elsewhere](.claude/mem/external-docs.md) — `README.md`, `CHANGELOG.md`, `TODO.md`, `docs/*-plan.md`
+- [Commands & Required env](.claude/mem/commands.md) — install, run, `--graph` export, verification (no test suite yet), env vars (`OPENAI_API_KEY`, `TAVILY_API_KEY`, `WLANGGRAPH_POSTGRES_DSN`, `ASKANSWER_DB_PATH`, …)
+- [Architecture — Orchestration](.claude/mem/architecture-orchestration.md) — main graph topology, `SearchState`, `ContextSchema`, parent nodes, react subgraph, shell HITL flow
+- [Architecture — Extensibility](.claude/mem/architecture-extensibility.md) — `IntentHandler` protocol + `IntentRegistry` priorities, `ToolRegistry` tags & confirmation classes, MCP tool wrapping
+- [Architecture — Subgraphs as tools](.claude/mem/architecture-subgraphs.md) — SQL agent and Helix spec-loop, both exposed via the tool registry with `ToolRuntime` context passthrough
+- [Architecture — Runtime services](.claude/mem/architecture-runtime.md) — `_ModelProxy` hot swap, audit/pricing, SQLite persistence, time travel, MCP client manager, CLI/REPL streaming
+- [Conventions](.claude/mem/conventions.md) — partial-dict returns, registry-only tools, lazy persistence, intent extension rules, security boundaries
+- [What's documented elsewhere](.claude/mem/external-docs.md) — `README.md`, `CHANGELOG.md`, `TODO.md`, `AGENTS.md`, `docs/*.md`, `web/`
 
 ## Maintenance rule
 
