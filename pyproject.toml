@@ -20,8 +20,18 @@ dependencies = [
     "prompt_toolkit>=3.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
 [project.scripts]
 askanswer = "askanswer.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["askanswer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
