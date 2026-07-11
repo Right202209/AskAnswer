@@ -30,7 +30,11 @@ TAG_FILE = BUNDLE_FILE = "file_read"
 TAG_SQL = BUNDLE_SQL = "sql"
 TAG_MATH = "math"
 TAG_HELIX = "helix"
-ALL_INTENT_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, TAG_SQL, TAG_MATH, TAG_HELIX})
+TAG_RESEARCH = "research"
+TAG_DECISION = "decision"
+ALL_INTENT_TAGS = frozenset(
+    {TAG_CHAT, TAG_SEARCH, TAG_FILE, TAG_SQL, TAG_MATH, TAG_HELIX, TAG_RESEARCH, TAG_DECISION}
+)
 ALL_BUNDLES = ALL_INTENT_TAGS
 
 # 内置工具默认在所有 intent tag 中可用，方便 react 循环跨 intent 串工具
@@ -132,6 +136,8 @@ class ToolRegistry:
         """从 MCP 管理器实时同步工具，重建注册表中 mcp 那一片。
 
         在 ``/mcp <url>`` 连接成功或 ``/mcp remove <name>`` 之后调用。
+        健康探测标记为 ``disconnected`` 的 server，其工具会被跳过 —— 避免把已失联
+        server 的死工具继续暴露给 LLM；server 恢复后再次 refresh 即可重新出现。
         """
         try:
             specs = _mcp_manager().list_tools()
@@ -140,9 +146,21 @@ class ToolRegistry:
             _LOG.warning("MCP list_tools failed during registry refresh: %s", exc)
             specs = []
 
+        # 收集处于 disconnected 状态的 server 名，稍后据此过滤其工具。
+        try:
+            offline = {
+                s["name"]
+                for s in _mcp_manager().list_servers()
+                if s.get("status") == "disconnected"
+            }
+        except Exception:
+            offline = set()
+
         # 先把旧的 mcp:* 条目摘掉，避免出现已断开服务的残留工具
         self.unregister_source_prefix("mcp:")
         for spec in specs:
+            if spec.get("server") in offline:
+                continue
             wrapped = _wrap_mcp_tool(spec)
             if wrapped is None:
                 continue
@@ -169,6 +187,8 @@ def get_registry() -> ToolRegistry:
             _seed_builtin(r)
             _seed_sql(r)
             _seed_helix(r)
+            _seed_research(r)
+            _seed_decision(r)
             r.refresh_mcp()
             _registry = r
         return _registry
@@ -265,6 +285,44 @@ def _seed_helix(registry: ToolRegistry) -> None:
             tool=helix_spec_loop,
             tags=frozenset({TAG_CHAT, TAG_HELIX, "helix_tool"}),
             source="helix",
+        )
+    )
+
+
+def _seed_research(registry: ToolRegistry) -> None:
+    """注册多源研究简报工具；模块缺失时跳过，不影响其他工具。"""
+    try:
+        from .research.research_tool import research_brief_loop
+    except ImportError as exc:
+        import sys
+        print(f"[askanswer] research_brief_loop 工具加载失败: {exc}", file=sys.stderr)
+        _LOG.warning("research_brief_loop tool unavailable: %s", exc)
+        return
+    # 仅暴露给 chat / research bundle：避免 sql / file_read / math 等流程下被误调用。
+    registry.register(
+        ToolDescriptor(
+            tool=research_brief_loop,
+            tags=frozenset({TAG_CHAT, TAG_RESEARCH, "research_tool"}),
+            source="research",
+        )
+    )
+
+
+def _seed_decision(registry: ToolRegistry) -> None:
+    """注册决策备忘工具；模块缺失时跳过，不影响其他工具。"""
+    try:
+        from .decision.decision_tool import decision_memo_loop
+    except ImportError as exc:
+        import sys
+        print(f"[askanswer] decision_memo_loop 工具加载失败: {exc}", file=sys.stderr)
+        _LOG.warning("decision_memo_loop tool unavailable: %s", exc)
+        return
+    # 仅暴露给 chat / decision bundle：避免其它更精准的流程下被误调用。
+    registry.register(
+        ToolDescriptor(
+            tool=decision_memo_loop,
+            tags=frozenset({TAG_CHAT, TAG_DECISION, "decision_tool"}),
+            source="decision",
         )
     )
 

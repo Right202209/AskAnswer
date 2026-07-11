@@ -28,7 +28,12 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 
 # 当前自管 schema 版本号；新增列 / 表时把版本号 +1，并在 ``_migrate`` 里追加迁移分支。
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 4
+
+
+def _default_tenant_id() -> str | None:
+    """写入路径未显式给 tenant 时的兜底：读环境变量，缺省为 None（不分租户）。"""
+    return os.environ.get("ASKANSWER_TENANT_ID") or None
 
 
 def default_db_path() -> Path:
@@ -57,6 +62,7 @@ class ThreadMeta:
     last_intent: str | None = None
     model_label: str | None = None
     preview: str | None = None   # 最近一条用户消息前 80 字符
+    tenant_id: str | None = None  # 归属租户；NULL 视为“不分租户”桶
 
 
 @dataclass
@@ -76,6 +82,7 @@ class AuditEvent:
     duration_ms: int | None = None
     intent: str | None = None
     error: str | None = None
+    tenant_id: str | None = None
 
 
 class PersistenceManager:
@@ -133,6 +140,7 @@ class PersistenceManager:
         model_label: str | None = None,
         preview: str | None = None,
         message_count: int | None = None,
+        tenant_id: str | None = None,
     ) -> None:
         """写入或更新一行 thread_meta。
 
@@ -142,6 +150,10 @@ class PersistenceManager:
         - 其它字段：None 表示“不动”，非 None 表示“覆盖”。
         - updated_at 取 max(now, 旧值)，避免跨进程时钟回退导致排序异常。
         - created_at 仅 INSERT 阶段写入；UPDATE 分支不动它。
+        - tenant_id：写入路径的“归属租户”。未显式传入则回退到
+          ``ASKANSWER_TENANT_ID`` 环境变量，再兜底 None（不分租户）。
+          UPDATE 分支用 COALESCE 保留既有归属，只在原值为 NULL 时才被采纳，
+          避免线程被后写入的租户“抢走”。
 
         以单条 SQLite UPSERT 完成（``INSERT … ON CONFLICT … DO UPDATE``），
         消除了 “SELECT 1 → INSERT/UPDATE” 的逻辑竞争窗口：多进程同 thread
@@ -150,6 +162,7 @@ class PersistenceManager:
         （INSERT 走默认值；UPDATE 走 “None 即保留”），因此各自单独绑定。
         """
         now = int(time.time())
+        tenant = tenant_id if tenant_id is not None else _default_tenant_id()
         # INSERT 分支的 title 默认值：未显式给出时回退到 preview 派生。
         # UPDATE 分支必须使用原始 title（可能是 None），否则首次派生的标题
         # 会在后续调用上把已存在的好标题覆盖掉。
@@ -161,14 +174,15 @@ class PersistenceManager:
                 """
                 INSERT INTO thread_meta(
                     thread_id, title, tags, created_at, updated_at,
-                    message_count, last_intent, model_label, preview
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    message_count, last_intent, model_label, preview, tenant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     title         = COALESCE(?, thread_meta.title),
                     last_intent   = COALESCE(excluded.last_intent, thread_meta.last_intent),
                     model_label   = COALESCE(excluded.model_label, thread_meta.model_label),
                     preview       = COALESCE(excluded.preview, thread_meta.preview),
                     message_count = COALESCE(?, thread_meta.message_count),
+                    tenant_id     = COALESCE(thread_meta.tenant_id, excluded.tenant_id),
                     updated_at    = MAX(excluded.updated_at, thread_meta.updated_at)
                 """,
                 (
@@ -181,6 +195,7 @@ class PersistenceManager:
                     intent,
                     model_label,
                     preview,
+                    tenant,
                     # DO UPDATE 分支专用绑定：raw title / raw message_count
                     title,
                     update_count,
@@ -191,49 +206,77 @@ class PersistenceManager:
         self,
         limit: int = 50,
         query: str | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> list[ThreadMeta]:
-        """按 updated_at 倒序列出，可选按 title/preview 模糊匹配。"""
+        """按 updated_at 倒序列出，可选按 title/preview 模糊匹配。
+
+        ``tenant_id`` 为 None 时不做租户过滤（等价旧行为，兼容既有调用）；
+        非 None 时只返回该租户的线程（``tenant_id`` 为 NULL 的旧数据不会串到
+        某个具名租户下）。
+        """
         sql = (
             "SELECT thread_id, title, tags, created_at, updated_at, "
-            "message_count, last_intent, model_label, preview "
+            "message_count, last_intent, model_label, preview, tenant_id "
             "FROM thread_meta "
         )
         params: list = []
+        where: list[str] = []
         q = (query or "").strip()
         if q:
-            sql += "WHERE title LIKE ? OR preview LIKE ? "
+            where.append("(title LIKE ? OR preview LIKE ?)")
             like = f"%{q}%"
             params.extend([like, like])
+        if tenant_id is not None:
+            where.append("tenant_id = ?")
+            params.append(tenant_id)
+        if where:
+            sql += "WHERE " + " AND ".join(where) + " "
         sql += "ORDER BY updated_at DESC LIMIT ?"
         params.append(int(limit))
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_meta(r) for r in rows]
 
-    def get_meta(self, thread_id: str) -> ThreadMeta | None:
+    def get_meta(self, thread_id: str, *, tenant_id: str | None = None) -> ThreadMeta | None:
+        """取单条线程元数据；``tenant_id`` 非 None 时越租户访问返回 None。"""
+        sql = (
+            "SELECT thread_id, title, tags, created_at, updated_at, "
+            "message_count, last_intent, model_label, preview, tenant_id "
+            "FROM thread_meta WHERE thread_id = ?"
+        )
+        params: list = [thread_id]
+        if tenant_id is not None:
+            sql += " AND tenant_id = ?"
+            params.append(tenant_id)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT thread_id, title, tags, created_at, updated_at, "
-                "message_count, last_intent, model_label, preview "
-                "FROM thread_meta WHERE thread_id = ?",
-                (thread_id,),
-            ).fetchone()
+            row = self._conn.execute(sql, params).fetchone()
         return _row_to_meta(row) if row else None
 
-    def find_by_prefix(self, prefix: str, limit: int = 5) -> list[ThreadMeta]:
+    def find_by_prefix(
+        self,
+        prefix: str,
+        limit: int = 5,
+        *,
+        tenant_id: str | None = None,
+    ) -> list[ThreadMeta]:
         """按 thread_id 前缀匹配（4 字符及以上才生效）。"""
         prefix = (prefix or "").strip()
         if len(prefix) < 4:
             return []
+        sql = (
+            "SELECT thread_id, title, tags, created_at, updated_at, "
+            "message_count, last_intent, model_label, preview, tenant_id "
+            "FROM thread_meta WHERE thread_id LIKE ? "
+        )
+        params: list = [f"{prefix}%"]
+        if tenant_id is not None:
+            sql += "AND tenant_id = ? "
+            params.append(tenant_id)
+        sql += "ORDER BY updated_at DESC LIMIT ?"
+        params.append(int(limit))
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT thread_id, title, tags, created_at, updated_at, "
-                "message_count, last_intent, model_label, preview "
-                "FROM thread_meta "
-                "WHERE thread_id LIKE ? "
-                "ORDER BY updated_at DESC LIMIT ?",
-                (f"{prefix}%", int(limit)),
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_meta(r) for r in rows]
 
     def set_title(self, thread_id: str, title: str) -> bool:
@@ -248,12 +291,19 @@ class PersistenceManager:
             )
             return cur.rowcount > 0
 
-    def delete_thread(self, thread_id: str) -> bool:
+    def delete_thread(self, thread_id: str, *, tenant_id: str | None = None) -> bool:
         """同时清掉 SqliteSaver 三张内部表 + thread_meta。
 
         SqliteSaver 内部表名按版本可能略有差异；用 try/except 兜底，对没有这张表
         或没有 thread_id 列的情况静默跳过。
+
+        ``tenant_id`` 非 None 时先校验归属：越租户删除直接返回 False，且不动任何
+        checkpoint 数据（避免 A 租户删掉 B 租户的会话）。
         """
+        if tenant_id is not None:
+            owner = self.get_meta(thread_id)
+            if owner is None or owner.tenant_id != tenant_id:
+                return False
         existed = False
         with self._lock, self._conn:
             # SqliteSaver 内部表：v2 是 checkpoints / writes / checkpoint_blobs
@@ -274,8 +324,69 @@ class PersistenceManager:
                 )
             except sqlite3.OperationalError:
                 pass
+            try:
+                self._conn.execute(
+                    "DELETE FROM checkpoint_label WHERE thread_id = ?", (thread_id,)
+                )
+            except sqlite3.OperationalError:
+                pass
             existed = cur.rowcount > 0
         return existed
+
+    # ── checkpoint labels（/undo 命名点） ────────────────────────────────
+
+    def set_checkpoint_label(
+        self,
+        thread_id: str,
+        checkpoint_id: str,
+        label: str,
+    ) -> bool:
+        """给某个 checkpoint 打 label（同 thread 内 label 唯一，重复则移动指向）。
+
+        返回是否写入成功（label / checkpoint_id 任一为空则拒绝，返回 False）。
+        """
+        label = (label or "").strip()
+        if not thread_id or not checkpoint_id or not label:
+            return False
+        now = int(time.time())
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO checkpoint_label(thread_id, checkpoint_id, label, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(thread_id, label) DO UPDATE SET
+                    checkpoint_id = excluded.checkpoint_id,
+                    created_at    = excluded.created_at
+                """,
+                (thread_id, checkpoint_id, label, now),
+            )
+        return True
+
+    def resolve_checkpoint_label(self, thread_id: str, label: str) -> str | None:
+        """按 label 反查 checkpoint_id；找不到返回 None。"""
+        label = (label or "").strip()
+        if not thread_id or not label:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT checkpoint_id FROM checkpoint_label "
+                "WHERE thread_id = ? AND label = ?",
+                (thread_id, label),
+            ).fetchone()
+        return row[0] if row else None
+
+    def list_checkpoint_labels(self, thread_id: str) -> list[dict]:
+        """列出某 thread 的所有 label，按创建时间倒序。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT label, checkpoint_id, created_at FROM checkpoint_label "
+                "WHERE thread_id = ? ORDER BY created_at DESC",
+                (thread_id,),
+            ).fetchall()
+        return [
+            {"label": r[0], "checkpoint_id": r[1], "created_at": int(r[2] or 0)}
+            for r in rows
+        ]
 
     def log_audit_event(
         self,
@@ -292,18 +403,20 @@ class PersistenceManager:
         duration_ms: int | None = None,
         intent: str | None = None,
         error: str | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        """追加一条审计事件。"""
+        """追加一条审计事件。``tenant_id`` 缺省时回退到环境变量。"""
         if not thread_id or not kind:
             return
+        tenant = tenant_id if tenant_id is not None else _default_tenant_id()
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO audit_event(
                     thread_id, ts, kind, tool_name, args_summary, result_size,
                     model_label, input_tokens, output_tokens, duration_ms,
-                    intent, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    intent, error, tenant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_id,
@@ -318,6 +431,7 @@ class PersistenceManager:
                     duration_ms,
                     intent,
                     _clip(error, 200) if error is not None else None,
+                    tenant,
                 ),
             )
 
@@ -326,8 +440,10 @@ class PersistenceManager:
 
         相比 N 次 ``log_audit_event``，这里只取一次锁、跑一个事务，
         热路径（每个 LLM/tool 调用一条）总开销显著降低。
+        每条事件的 ``tenant_id`` 缺省时回退到环境变量。
         """
         rows = []
+        default_tenant = _default_tenant_id()
         for event in events:
             thread_id = event.get("thread_id")
             kind = event.get("kind")
@@ -335,6 +451,9 @@ class PersistenceManager:
                 continue
             args_summary = event.get("args_summary")
             error = event.get("error")
+            tenant = event.get("tenant_id")
+            if tenant is None:
+                tenant = default_tenant
             rows.append((
                 thread_id,
                 int(event.get("ts") or time.time()),
@@ -348,6 +467,7 @@ class PersistenceManager:
                 event.get("duration_ms"),
                 event.get("intent"),
                 _clip(error, 200) if error is not None else None,
+                tenant,
             ))
         if not rows:
             return 0
@@ -357,8 +477,8 @@ class PersistenceManager:
                 INSERT INTO audit_event(
                     thread_id, ts, kind, tool_name, args_summary, result_size,
                     model_label, input_tokens, output_tokens, duration_ms,
-                    intent, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    intent, error, tenant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -371,11 +491,13 @@ class PersistenceManager:
         limit: int = 50,
         kind: str | None = None,
         days: int | None = None,
+        tenant_id: str | None = None,
     ) -> list[AuditEvent]:
-        """按时间倒序列出审计事件。"""
+        """按时间倒序列出审计事件。``tenant_id`` 非 None 时按租户过滤。"""
         sql = (
             "SELECT id, thread_id, ts, kind, tool_name, args_summary, result_size, "
-            "model_label, input_tokens, output_tokens, duration_ms, intent, error "
+            "model_label, input_tokens, output_tokens, duration_ms, intent, error, "
+            "tenant_id "
             "FROM audit_event "
         )
         where: list[str] = []
@@ -389,6 +511,9 @@ class PersistenceManager:
         if days and days > 0:
             where.append("ts >= ?")
             params.append(int(time.time()) - int(days) * 86400)
+        if tenant_id is not None:
+            where.append("tenant_id = ?")
+            params.append(tenant_id)
         if where:
             sql += "WHERE " + " AND ".join(where) + " "
         sql += "ORDER BY ts DESC LIMIT ?"
@@ -402,8 +527,9 @@ class PersistenceManager:
         *,
         thread_id: str | None = None,
         days: int | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, list[dict]]:
-        """返回模型与工具两个维度的轻量聚合。"""
+        """返回模型与工具两个维度的轻量聚合。``tenant_id`` 非 None 时按租户过滤。"""
         where: list[str] = []
         params: list = []
         if thread_id:
@@ -412,6 +538,9 @@ class PersistenceManager:
         if days and days > 0:
             where.append("ts >= ?")
             params.append(int(time.time()) - int(days) * 86400)
+        if tenant_id is not None:
+            where.append("tenant_id = ?")
+            params.append(tenant_id)
         clause = "WHERE " + " AND ".join(where) if where else ""
 
         with self._lock:
@@ -472,6 +601,7 @@ class PersistenceManager:
         events: list[dict],
         *,
         thread_id: str,
+        tenant_id: str | None = None,
     ) -> int:
         """把导出的审计事件恢复到新 thread_id 下，返回写入数量。"""
         count = 0
@@ -491,6 +621,7 @@ class PersistenceManager:
                 duration_ms=_int_or_none(event.get("duration_ms")),
                 intent=event.get("intent"),
                 error=event.get("error"),
+                tenant_id=tenant_id,
             )
             count += 1
         return count
@@ -571,15 +702,58 @@ class PersistenceManager:
                 )
                 current = 2
 
-            # 未来加列 / 加表的迁移分支模板：
-            # if current < 2:
-            #     self._conn.execute("ALTER TABLE thread_meta ADD COLUMN summary TEXT")
-            #     current = 2
+            if current < 3:
+                # 多租户隔离：给两张表加 tenant_id 列（旧行迁移后为 NULL，行为不退化），
+                # 并建按 tenant 过滤的复合索引。SqliteSaver 内部表不动，隔离在
+                # thread_meta / audit_event 层做（见 execution-plan Phase 1.3）。
+                self._add_column_if_missing("thread_meta", "tenant_id", "TEXT")
+                self._add_column_if_missing("audit_event", "tenant_id", "TEXT")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_thread_meta_tenant_updated "
+                    "ON thread_meta(tenant_id, updated_at DESC)"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_tenant_ts "
+                    "ON audit_event(tenant_id, ts DESC)"
+                )
+                current = 3
+
+            if current < 4:
+                # /undo 命名点：给 checkpoint 打 label，让用户回到有意义的还原点。
+                # (thread_id, label) 作主键：同名 label 再次打标即“移动”到新 checkpoint。
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS checkpoint_label (
+                        thread_id TEXT NOT NULL,
+                        checkpoint_id TEXT NOT NULL,
+                        label TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        PRIMARY KEY (thread_id, label)
+                    )
+                    """
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_checkpoint_label_thread "
+                    "ON checkpoint_label(thread_id, created_at DESC)"
+                )
+                current = 4
 
             self._conn.execute(
                 "INSERT OR REPLACE INTO askanswer_schema(key, value) VALUES('version', ?)",
                 (str(current),),
             )
+
+    def _add_column_if_missing(self, table: str, column: str, decl: str) -> None:
+        """幂等地给已有表加列：列已存在时静默跳过。
+
+        ``ALTER TABLE ADD COLUMN`` 在列重复时会抛 OperationalError；用 PRAGMA
+        先查一遍现有列，避免依赖异常字符串匹配。
+        """
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(row[1]) for row in rows}
+        if column in existing:
+            return
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 # ── helpers ───────────────────────────────────────────────────────────
@@ -620,6 +794,7 @@ def _row_to_meta(row) -> ThreadMeta:
         last_intent,
         model_label,
         preview,
+        tenant_id,
     ) = row
     try:
         tags = json.loads(tags_json) if tags_json else []
@@ -637,6 +812,7 @@ def _row_to_meta(row) -> ThreadMeta:
         last_intent=last_intent,
         model_label=model_label,
         preview=preview,
+        tenant_id=tenant_id,
     )
 
 
@@ -655,6 +831,7 @@ def _row_to_audit(row) -> AuditEvent:
         duration_ms,
         intent,
         error,
+        tenant_id,
     ) = row
     return AuditEvent(
         id=int(event_id or 0),
@@ -670,6 +847,7 @@ def _row_to_audit(row) -> AuditEvent:
         duration_ms=_int_or_none(duration_ms),
         intent=intent,
         error=error,
+        tenant_id=tenant_id,
     )
 
 

@@ -46,6 +46,7 @@ from .audit import begin_run, end_run, flush_pending, log_event
 from .intents import get_intent_registry
 from .load import current_model_label, model, set_model
 from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
+from . import mcp_profile
 from .persistence import (
     AuditEvent,
     ThreadMeta,
@@ -55,7 +56,13 @@ from .persistence import (
 from .pricing import estimate_cost_usd, format_cost
 from .registry import get_registry
 from .schema import ContextSchema
-from .timetravel import _update_state, fork_thread, list_checkpoints, rewind_to
+from .timetravel import (
+    _update_state,
+    find_checkpoint_index_by_id,
+    fork_thread,
+    list_checkpoints,
+    rewind_to,
+)
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 from .ui_input import SLASH_COMMANDS, cmd_meta, make_session, read_line
 from .ui_select import CANCELLED, select_option
@@ -278,13 +285,14 @@ def _help_examples(cmd: str) -> list[str]:
     table = {
         "/model":   ["/model gpt-4o-mini", "/model anthropic:claude-3-5-sonnet"],
         "/mcp":     ["/mcp https://example.com/mcp my-server",
-                     "/mcp tools my-server", "/mcp remove my-server"],
+                     "/mcp add_stdio fs npx -y @modelcontextprotocol/server-filesystem /tmp",
+                     "/mcp health", "/mcp tools my-server", "/mcp remove my-server"],
         "/threads": ["/threads", "/threads sql 关键词"],
         "/resume":  ["/resume 1", "/resume 1e14b9b"],
         "/title":   ["/title 周三的 SQL 调试"],
         "/delete":  ["/delete 1", "/delete 1e14b9b"],
         "/checkpoints": ["/checkpoints"],
-        "/undo":    ["/undo", "/undo 2"],
+        "/undo":    ["/undo", "/undo 2", "/undo 2 --label before-refactor", "/undo --label before-refactor"],
         "/jump":    ["/jump 3"],
         "/fork":    ["/fork", "/fork 2"],
         "/audit":   ["/audit", "/audit 1 --limit 20", "/audit --kind tool_call"],
@@ -301,7 +309,9 @@ def mcp_help_block() -> None:
     print()
     print(f" {C.BOLD}/mcp{C.RESET}")
     print(f"   {C.CYAN}/mcp <url> [name]{C.RESET}      连接一个 MCP 服务 (HTTP/SSE)")
-    print(f"   {C.CYAN}/mcp list{C.RESET}              列出已连接的 MCP 服务")
+    print(f"   {C.CYAN}/mcp add_stdio <name> <cmd> [args…]{C.RESET}  以子进程方式启动 stdio 服务")
+    print(f"   {C.CYAN}/mcp list [-v]{C.RESET}          列出已连接的 MCP 服务 (-v 显示健康详情)")
+    print(f"   {C.CYAN}/mcp health [name]{C.RESET}      探测服务健康状态并刷新工具")
     print(f"   {C.CYAN}/mcp tools [server]{C.RESET}    列出工具 (可选按 server 过滤)")
     print(f"   {C.CYAN}/mcp remove <name>{C.RESET}     断开指定服务")
     print()
@@ -321,7 +331,7 @@ def status_block(thread_id: str) -> None:
     rows.append(("model", current_model_label()))
     try:
         pm = get_persistence()
-        thread_count = len(pm.list_threads(limit=10000))
+        thread_count = len(pm.list_threads(limit=10000, tenant_id=_current_tenant()))
         rows.append(("store", f"{pm.db_path}  [subtle]({thread_count} threads)[/]"))
     except Exception:
         pass
@@ -403,12 +413,63 @@ def _truncate(s: str, limit: int = 60) -> str:
     return out + "…"
 
 
+def _current_tenant() -> str | None:
+    """当前 CLI 会话归属的租户；未设 ``ASKANSWER_TENANT_ID`` 时为 None（不分租户）。
+
+    所有按租户过滤的命令（/threads、/audit、/usage、/resume、/delete …）都以它作为
+    persistence 调用的 ``tenant_id``，让两个 tenant 在同一 SQLite 文件下互不可见。
+    """
+    return os.getenv("ASKANSWER_TENANT_ID") or None
+
+
+def _init_telemetry() -> None:
+    """按环境变量装配可观测性 exporter；lazy import 避免顶层依赖 telemetry。"""
+    try:
+        from . import telemetry
+
+        telemetry.init_telemetry()
+    except Exception as exc:
+        # 可观测性初始化失败绝不能阻断 CLI 启动。
+        _console.print(f"  [warning]⚠ telemetry 初始化失败：{exc}[/]")
+
+
+def _telemetry_span(name: str, **attrs):
+    """返回一个 telemetry span 上下文管理器；未启用时是零开销 no-op。"""
+    from . import telemetry
+
+    return telemetry.span(name, **attrs)
+
+
+def _open_root_span(thread_id: str, tenant_id: str | None):
+    """为一轮请求开根 span；未启用返回 None。异常不阻断主流程。"""
+    try:
+        from . import telemetry
+
+        return telemetry.open_span(
+            "askanswer.query", thread_id=thread_id, tenant_id=tenant_id or ""
+        )
+    except Exception:
+        return None
+
+
+def _close_root_span(handle) -> None:
+    """关闭根 span；handle 为 None 或未启用时 no-op。"""
+    if handle is None:
+        return
+    try:
+        from . import telemetry
+
+        telemetry.close_span(handle)
+    except Exception:
+        pass
+
+
 def _runtime_context() -> ContextSchema:
     """从环境变量构造一份 ContextSchema 传给图（CLI 是参数注入的边界）。"""
     return ContextSchema(
         db_dsn=os.getenv("WLANGGRAPH_POSTGRES_DSN") or None,
         db_dialect=os.getenv("ASKANSWER_DB_DIALECT") or None,
-        tenant_id=os.getenv("ASKANSWER_TENANT_ID") or None,
+        tenant_id=_current_tenant(),
     )
 
 
@@ -423,7 +484,9 @@ def stream_query(
     config = {"configurable": {"thread_id": thread_id}}
     context = runtime_context or _runtime_context()
     graph_input: object = {"messages": [HumanMessage(content=query)]}
-    audit_tokens = begin_run(thread_id)
+    audit_tokens = begin_run(thread_id, tenant_id=context.tenant_id)
+    # 整轮请求作为 telemetry 根 span；未启用时 handle 为 None，收尾时 no-op。
+    telemetry_span = _open_root_span(thread_id, context.tenant_id)
     # 缓存一次最终状态，避免 finally 与下文 meta 持久化各 get_state 一次
     final_state_values: dict | None = None
 
@@ -488,6 +551,7 @@ def stream_query(
         except Exception:
             pass
         flush_pending(thread_id=thread_id, intent=audit_intent)
+        _close_root_span(telemetry_span)
         end_run(audit_tokens)
 
     # 兜底：若节点流里没拿到 final_answer，从 state 里找最后一条消息内容
@@ -531,6 +595,7 @@ def stream_query(
             model_label=current_model_label(),
             preview=preview_text,
             message_count=human_count,
+            tenant_id=context.tenant_id,
         )
     except Exception:
         pass
@@ -1057,7 +1122,11 @@ def handle_mcp_command(args: str, *, thread_id: str) -> None:
     first_lc = first.lower()
 
     if first_lc in {"list", "ls"}:
-        _print_mcp_servers()
+        _print_mcp_servers(verbose=rest.strip() in {"-v", "--verbose"})
+    elif first_lc in {"health", "ping"}:
+        _mcp_health_command(rest or None, thread_id=thread_id)
+    elif first_lc in {"add_stdio", "stdio"}:
+        _add_mcp_stdio(rest, thread_id=thread_id)
     elif first_lc in {"tools", "tool"}:
         _print_mcp_tools(rest or None)
     elif first_lc in {"remove", "rm", "disconnect"}:
@@ -1094,6 +1163,13 @@ def _add_mcp_url(url: str, name: str | None, *, thread_id: str) -> None:
         return
     # 注册表里 mcp:* 这一片需要重新拉取
     get_registry().refresh_mcp()
+    # 连接成功后写入 profile，下次启动自动重连；失败仅告警不阻塞。
+    # transport 与 manager 的猜测口径一致（/sse → sse，否则 streamable_http），
+    # 保证 profile 回放时不会把 SSE 端点错当成 streamable_http。
+    transport = "sse" if url.rstrip("/").lower().endswith("/sse") else "streamable_http"
+    _save_mcp_profile_entry(
+        {"name": registered, "transport": transport, "url": url}
+    )
     tools = _mcp_manager().list_tools(server=registered)
     log_event(
         kind="mcp_connect",
@@ -1118,11 +1194,122 @@ def _add_mcp_url(url: str, name: str | None, *, thread_id: str) -> None:
     print()
 
 
+def _add_mcp_stdio(args: str, *, thread_id: str) -> None:
+    """``/mcp add_stdio <name> <command> [args…]``：启动一个 stdio 子进程 server。"""
+    parts = _split_args(args)
+    if parts is None:
+        return
+    if len(parts) < 2:
+        print(
+            f"\n  {C.RED}用法：{C.RESET}/mcp add_stdio <name> <command> [args…]\n"
+            f"  {C.DIM}例：/mcp add_stdio fs npx -y @modelcontextprotocol/server-filesystem /tmp{C.RESET}\n"
+        )
+        return
+    name, command, cmd_args = parts[0], parts[1], parts[2:]
+    try:
+        registered = _mcp_manager().add_stdio(name=name, command=command, args=cmd_args)
+    except Exception as exc:
+        log_event(
+            kind="mcp_connect",
+            thread_id=thread_id,
+            args_summary=f"stdio:{command}",
+            error=str(exc),
+            immediate=True,
+        )
+        render_error(f"MCP 连接失败: {exc}")
+        return
+    get_registry().refresh_mcp()
+    _save_mcp_profile_entry(
+        {
+            "name": registered,
+            "transport": "stdio",
+            "command": command,
+            "args": cmd_args,
+        }
+    )
+    tools = _mcp_manager().list_tools(server=registered)
+    log_event(
+        kind="mcp_connect",
+        thread_id=thread_id,
+        tool_name=registered,
+        args_summary=f"stdio:{command}",
+        result_size=len(tools),
+        immediate=True,
+    )
+    print()
+    print(
+        f"  {C.GREEN}✓ 已连接 MCP:{C.RESET} {C.BOLD}{registered}{C.RESET}  "
+        f"{C.DIM}stdio · {command}{C.RESET}"
+    )
+    print(f"  {C.DIM}工具 ({len(tools)}){C.RESET}" if tools else f"  {C.DIM}（未发现工具）{C.RESET}")
+    print()
+
+
+def _mcp_health_command(name: str | None, *, thread_id: str) -> None:
+    """``/mcp health [name]``：探测健康状态、刷新注册表、渲染结果表格。"""
+    try:
+        results = _mcp_manager().health_check(name)
+    except Exception as exc:
+        render_error(f"健康探测失败: {exc}")
+        return
+    # 探测后有 server 可能翻红/转绿，工具集需要同步；registry 会跳过 disconnected。
+    get_registry().refresh_mcp()
+    _console.print()
+    if not results:
+        hint = f"未找到 MCP 服务：{name}" if name else "暂未连接 MCP 服务"
+        _console.print(f"  [subtle]（{hint}）[/]")
+        _console.print()
+        return
+    _console.print(f"  [bold]MCP Health ({len(results)})[/]")
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="subtle",
+        border_style="muted",
+        padding=(0, 1),
+        expand=False,
+    )
+    table.add_column("", width=1, no_wrap=True)
+    table.add_column("name", style="info", no_wrap=True)
+    table.add_column("transport", style="subtle", no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("tools", justify="right", style="subtle", no_wrap=True)
+    table.add_column("checked", style="subtle", no_wrap=True)
+    table.add_column("error", style="subtle", no_wrap=True, overflow="ellipsis", max_width=32)
+    for s in results:
+        connected = s.get("status") == "connected"
+        dot = "[success]●[/]" if connected else "[danger]○[/]"
+        status_cell = "[success]connected[/]" if connected else "[danger]disconnected[/]"
+        table.add_row(
+            dot,
+            s["name"],
+            s["transport"],
+            status_cell,
+            str(s["tools"]),
+            _format_ts(s.get("last_checked") or 0),
+            s.get("last_error") or "",
+        )
+    _console.print(table)
+    _console.print()
+
+
+def _save_mcp_profile_entry(record: dict) -> None:
+    """把一条 server 记录写入 profile；失败仅告警，绝不阻塞连接主流程。"""
+    try:
+        mcp_profile.save_entry(record)
+    except Exception as exc:
+        _console.print(f"  [warning]⚠ 写入 MCP profile 失败：{exc}[/]")
+
+
 def _remove_mcp_server(name: str) -> None:
-    """断开指定 MCP 服务并刷新注册表。"""
+    """断开指定 MCP 服务并刷新注册表，同步从 profile 删除。"""
     ok = _mcp_manager().remove(name)
     if ok:
         get_registry().refresh_mcp()
+        try:
+            mcp_profile.remove_entry(name)
+        except Exception:
+            pass
     print()
     if ok:
         print(f"  {C.GREEN}✓ 已断开 MCP:{C.RESET} {name}")
@@ -1131,8 +1318,8 @@ def _remove_mcp_server(name: str) -> None:
     print()
 
 
-def _print_mcp_servers() -> None:
-    """打印已连接的 MCP 服务清单。"""
+def _print_mcp_servers(*, verbose: bool = False) -> None:
+    """打印已连接的 MCP 服务清单。verbose 模式下附带健康状态与最近探测时间。"""
     servers = _mcp_manager().list_servers()
     _console.print()
     if not servers:
@@ -1152,15 +1339,19 @@ def _print_mcp_servers() -> None:
     table.add_column("name", style="info", no_wrap=True)
     table.add_column("transport", style="subtle", no_wrap=True)
     table.add_column("tools", justify="right", style="subtle", no_wrap=True)
+    if verbose:
+        table.add_column("status", no_wrap=True)
+        table.add_column("checked", style="subtle", no_wrap=True)
     table.add_column("url", style="subtle", no_wrap=True, overflow="ellipsis", max_width=46)
     for s in servers:
-        table.add_row(
-            "[success]●[/]",
-            s["name"],
-            s["transport"],
-            str(s["tools"]),
-            s.get("url") or "",
-        )
+        connected = s.get("status", "connected") == "connected"
+        dot = "[success]●[/]" if connected else "[danger]○[/]"
+        row = [dot, s["name"], s["transport"], str(s["tools"])]
+        if verbose:
+            status_cell = "[success]connected[/]" if connected else "[danger]disconnected[/]"
+            row.extend([status_cell, _format_ts(s.get("last_checked") or 0)])
+        row.append(s.get("url") or "")
+        table.add_row(*row)
     _console.print(table)
     _console.print()
 
@@ -1214,6 +1405,7 @@ def _resolve_thread(arg: str) -> ThreadMeta | None:
     if not arg:
         return None
     pm = get_persistence()
+    tenant = _current_tenant()
 
     # 1) 序号：相对最近一次 /threads 的输出
     if arg.isdigit():
@@ -1222,13 +1414,13 @@ def _resolve_thread(arg: str) -> ThreadMeta | None:
             return _LAST_LIST[idx]
         return None
 
-    # 2) 完整匹配（UUID 是 36 字符，但允许任意完整 ID）
-    meta = pm.get_meta(arg)
+    # 2) 完整匹配（UUID 是 36 字符，但允许任意完整 ID）；越 tenant 访问会被 get_meta 拦掉
+    meta = pm.get_meta(arg, tenant_id=tenant)
     if meta is not None:
         return meta
 
     # 3) 前缀匹配：≥4 字符才生效，避免 "a" 这种过宽匹配
-    matches = pm.find_by_prefix(arg, limit=2)
+    matches = pm.find_by_prefix(arg, limit=2, tenant_id=tenant)
     if len(matches) == 1:
         return matches[0]
     return None
@@ -1249,11 +1441,14 @@ def _has_pending_interrupt(app, thread_id: str) -> bool:
 
 
 def handle_threads_command(args: str, *, current: str) -> None:
-    """``/threads [keyword]``：按 updated_at 倒序列出最近 50 条。"""
+    """``/threads [keyword]``：按 updated_at 倒序列出最近 50 条（限当前 tenant）。"""
     global _LAST_LIST
     keyword = args.strip() or None
+    tenant = _current_tenant()
     try:
-        threads = get_persistence().list_threads(limit=50, query=keyword)
+        threads = get_persistence().list_threads(
+            limit=50, query=keyword, tenant_id=tenant
+        )
     except Exception as exc:
         render_error(f"读取持久化失败: {exc}")
         return
@@ -1266,8 +1461,9 @@ def handle_threads_command(args: str, *, current: str) -> None:
         _console.print()
         return
 
+    tenant_word = f"  [subtle]· tenant: {tenant}[/]" if tenant else ""
     title_word = f"  [subtle]· 关键词: {keyword}[/]" if keyword else ""
-    _console.print(f"  [bold]Threads ({len(threads)})[/]{title_word}")
+    _console.print(f"  [bold]Threads ({len(threads)})[/]{tenant_word}{title_word}")
 
     table = Table(
         box=box.SIMPLE_HEAD,
@@ -1431,7 +1627,9 @@ def handle_delete_command(args: str, *, current: str) -> str | None:
         return None
 
     try:
-        ok = get_persistence().delete_thread(target.thread_id)
+        ok = get_persistence().delete_thread(
+            target.thread_id, tenant_id=_current_tenant()
+        )
     except Exception as exc:
         render_error(f"删除失败: {exc}")
         return None
@@ -1473,6 +1671,15 @@ def handle_checkpoints_command(args: str, *, thread_id: str, app=None) -> None:
         return
     _console.print(f"  [bold]Checkpoints ({len(checkpoints)})[/]")
 
+    # checkpoint_id → label 映射，用于在表格里展示命名的还原点。
+    try:
+        labels = {
+            item["checkpoint_id"]: item["label"]
+            for item in get_persistence().list_checkpoint_labels(thread_id)
+        }
+    except Exception:
+        labels = {}
+
     table = Table(
         box=box.SIMPLE_HEAD,
         show_header=True,
@@ -1486,6 +1693,7 @@ def handle_checkpoints_command(args: str, *, thread_id: str, app=None) -> None:
     table.add_column("created", style="subtle", no_wrap=True)
     table.add_column("msgs", justify="right", style="subtle", no_wrap=True)
     table.add_column("step", style="subtle", no_wrap=True)
+    table.add_column("label", style="brand", no_wrap=True)
     table.add_column("flags", no_wrap=True)
 
     for cp in checkpoints:
@@ -1500,12 +1708,13 @@ def handle_checkpoints_command(args: str, *, thread_id: str, app=None) -> None:
             _format_ts(cp.created_at),
             str(cp.message_count),
             cp.step,
+            labels.get(cp.checkpoint_id, ""),
             " ".join(flags),
         )
     _console.print(table)
     _console.print(
         "  [subtle]用法：[/]"
-        "[info]/undo [n][/][subtle] 回到第 n 个历史点 · [/]"
+        "[info]/undo [n] [--label 名称][/][subtle] 回退并可命名还原点 · [/]"
         "[info]/jump <index>[/][subtle] 显式跳转 · [/]"
         "[info]/fork [index][/][subtle] 分叉新会话[/]"
     )
@@ -1513,12 +1722,51 @@ def handle_checkpoints_command(args: str, *, thread_id: str, app=None) -> None:
 
 
 def handle_undo_command(args: str, *, thread_id: str, app=None) -> None:
-    raw = args.strip()
-    index = 1 if not raw else _parse_nonnegative_int(raw)
-    if index is None or index < 1:
-        print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/undo [n]{C.RESET}  {C.DIM}n 默认为 1{C.RESET}\n")
+    parts = _split_args(args)
+    if parts is None:
         return
-    _rewind_command(app, thread_id, index, label="/undo")
+    parsed = _parse_undo_args(parts)
+    if parsed is None:
+        return
+    index, ckpt_label = parsed
+    # 纯 /undo 无参：沿用旧行为回退 1 步；带 --label 但无序号则走 label 反查。
+    if index is None and not ckpt_label:
+        index = 1
+    _rewind_command(app, thread_id, index, cmd="/undo", checkpoint_label=ckpt_label)
+
+
+def _parse_undo_args(parts: list[str]) -> tuple[int | None, str | None] | None:
+    """解析 ``/undo`` 参数：``[n] [--label NAME]``。
+
+    返回 ``(index, label)``；index 为 None 表示未显式给序号（可能走 label 反查）。
+    解析出错时打印用法并返回 None。
+    """
+    index: int | None = None
+    label: str | None = None
+    i = 0
+    usage = f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/undo [n] [--label 名称]{C.RESET}\n"
+    while i < len(parts):
+        part = parts[i]
+        if part == "--label":
+            if i + 1 >= len(parts):
+                print(usage)
+                return None
+            label = parts[i + 1].strip() or None
+            i += 2
+        elif part.startswith("--"):
+            print(f"\n  {C.RED}未知参数：{C.RESET}{part}\n")
+            return None
+        elif index is None:
+            parsed = _parse_nonnegative_int(part)
+            if parsed is None or parsed < 1:
+                print(usage)
+                return None
+            index = parsed
+            i += 1
+        else:
+            print(f"\n  {C.RED}多余参数：{C.RESET}{part}\n")
+            return None
+    return index, label
 
 
 def handle_jump_command(args: str, *, thread_id: str, app=None) -> None:
@@ -1526,25 +1774,61 @@ def handle_jump_command(args: str, *, thread_id: str, app=None) -> None:
     if index is None:
         print(f"\n  {C.RED}用法：{C.RESET}{C.CYAN}/jump <checkpoint-index>{C.RESET}\n")
         return
-    _rewind_command(app, thread_id, index, label="/jump")
+    _rewind_command(app, thread_id, index, cmd="/jump")
 
 
-def _rewind_command(app, thread_id: str, index: int, *, label: str) -> None:
+def _rewind_command(
+    app,
+    thread_id: str,
+    index: int | None,
+    *,
+    cmd: str,
+    checkpoint_label: str | None = None,
+) -> None:
     if app is None:
-        render_error(f"{label} 只能在已初始化的图上使用")
+        render_error(f"{cmd} 只能在已初始化的图上使用")
         return
+    pm = get_persistence()
+    # 显式序号 + --label：回滚后把 label 记到目标 checkpoint 上（命名还原点）。
+    # 仅 --label 无序号：按 label 反查历史里的 checkpoint 再回滚。
+    naming = index is not None and bool(checkpoint_label)
+    if index is None:
+        index = _resolve_label_index(app, pm, thread_id, checkpoint_label, cmd=cmd)
+        if index is None:
+            return
     try:
-        target = rewind_to(app, thread_id, index)
+        result = rewind_to(app, thread_id, index)
     except Exception as exc:
-        render_error(f"{label} 失败: {exc}")
+        render_error(f"{cmd} 失败: {exc}")
         return
+    target = result.target
+    if naming and target.checkpoint_id:
+        pm.set_checkpoint_label(thread_id, target.checkpoint_id, checkpoint_label)
+    label_note = f"  {C.DIM}· label={checkpoint_label}{C.RESET}" if checkpoint_label else ""
     print()
     print(
         f"  {C.GREEN}✓ 已回到 checkpoint:{C.RESET} "
         f"{C.CYAN}#{target.index}{C.RESET}  "
         f"{C.DIM}{target.node} · {target.message_count} msgs · step={target.step}{C.RESET}"
+        f"{label_note}"
     )
-    print(f"  {C.DIM}下一条问题会基于该快照继续。{C.RESET}\n")
+    print(
+        f"  {C.DIM}本次回滚影响 {result.affected_messages} 条消息；"
+        f"下一条问题会基于该快照继续。{C.RESET}\n"
+    )
+
+
+def _resolve_label_index(app, pm, thread_id: str, label: str | None, *, cmd: str) -> int | None:
+    """把 checkpoint label 反查成当前 history 里的序号；失败时打印错误并返回 None。"""
+    if not label:
+        render_error(f"{cmd} 需要序号或 --label 名称")
+        return None
+    checkpoint_id = pm.resolve_checkpoint_label(thread_id, label)
+    resolved = find_checkpoint_index_by_id(app, thread_id, checkpoint_id) if checkpoint_id else None
+    if resolved is None:
+        render_error(f"未找到 label 对应的 checkpoint：{label}")
+        return None
+    return resolved
 
 
 def handle_fork_command(args: str, *, current: str, app=None) -> str | None:
@@ -1608,6 +1892,7 @@ def handle_audit_command(args: str, *, current: str) -> None:
             thread_id=target.thread_id,
             kind=kind,
             limit=limit,
+            tenant_id=_current_tenant(),
         )
     except Exception as exc:
         render_error(f"读取审计失败: {exc}")
@@ -1644,6 +1929,7 @@ def handle_usage_command(args: str, *, current: str) -> None:
         summary = get_persistence().usage_summary(
             thread_id=thread.thread_id if thread else None,
             days=days,
+            tenant_id=_current_tenant(),
         )
     except Exception as exc:
         render_error(f"读取 usage 失败: {exc}")
@@ -1711,6 +1997,7 @@ def handle_import_command(args: str, *, app=None) -> str | None:
     values["pending_confirmations"] = {}
     values["pending_shell"] = {}
     new_id = str(uuid.uuid4())
+    tenant = _current_tenant()
     try:
         _update_state(app, {"configurable": {"thread_id": new_id}}, values)
         meta = payload.get("meta") or {}
@@ -1723,10 +2010,12 @@ def handle_import_command(args: str, *, app=None) -> str | None:
             model_label=meta.get("model_label") or current_model_label(),
             preview=preview,
             message_count=human_count,
+            tenant_id=tenant,
         )
         imported_events = get_persistence().import_audit_events(
             payload.get("audit") or [],
             thread_id=new_id,
+            tenant_id=tenant,
         )
     except Exception as exc:
         render_error(f"写入导入会话失败: {exc}")
@@ -1744,6 +2033,7 @@ def handle_import_command(args: str, *, app=None) -> str | None:
 def _resolve_thread_or_current(arg: str | None, current: str) -> ThreadMeta | None:
     token = (arg or "current").strip()
     if token.lower() in {"", "current", "this", "."}:
+        # 当前会话不做 tenant 校验：它就是本进程正在跑的 thread，天然属于本 tenant。
         meta = get_persistence().get_meta(current)
         if meta is not None:
             return meta
@@ -2084,6 +2374,52 @@ def export_graph(target: str) -> int:
     return 0
 
 
+def _autoconnect_mcp_profile() -> None:
+    """启动时从 ``~/.askanswer/mcp.json`` 逐项重连 MCP server。
+
+    单条失败仅告警、不阻塞启动（server 可能已下线）。全部尝试完再 refresh 一次
+    注册表，让本次成功连上的工具进入工具表。
+    """
+    try:
+        records = mcp_profile.load()
+    except Exception as exc:
+        _console.print(f"  [warning]⚠ 读取 MCP profile 失败：{exc}[/]")
+        return
+    if not records:
+        return
+    connected = 0
+    for record in records:
+        try:
+            _reconnect_mcp_record(record)
+            connected += 1
+        except Exception as exc:
+            name = record.get("name") or "(unknown)"
+            _console.print(f"  [warning]⚠ MCP 自动重连失败 {name}：{exc}[/]")
+    if connected:
+        get_registry().refresh_mcp()
+        _console.print(f"  [subtle]已从 profile 自动重连 {connected} 个 MCP 服务[/]")
+
+
+def _reconnect_mcp_record(record: dict) -> None:
+    """按 profile 记录里的 transport 选择重连方式。"""
+    transport = str(record.get("transport") or "").lower()
+    name = record.get("name")
+    if transport == "stdio":
+        _mcp_manager().add_stdio(
+            name=name,
+            command=record.get("command") or "",
+            args=list(record.get("args") or []),
+            env=record.get("env"),
+        )
+    else:
+        _mcp_manager().add_url(
+            record.get("url") or "",
+            name=name,
+            transport=transport or None,
+            headers=record.get("headers"),
+        )
+
+
 def main() -> int:
     """CLI 程序入口：解析参数 → 注册 atexit → 进入对应模式。"""
     parser = build_parser()
@@ -2103,6 +2439,10 @@ def main() -> int:
     try:
         # seed 一次注册表（内置 + sql + 任何已存在的 MCP），后续节点直接用
         get_registry()
+        # 按环境变量装配可观测性 exporter（LangSmith / OTEL）；未开启则零开销
+        _init_telemetry()
+        # 从 profile 自动重连上次连过的 MCP server（失败不阻塞启动）
+        _autoconnect_mcp_profile()
         app = create_search_assistant()
     except Exception as exc:
         render_error(f"初始化失败: {exc}")

@@ -23,6 +23,14 @@ class CheckpointInfo:
     created_at: int
     pending_confirm: bool
     snapshot: Any
+    checkpoint_id: str = ""
+
+
+@dataclass
+class RewindResult:
+    """``rewind_to`` 的返回：回到的目标点 + 本次回滚影响的消息条数。"""
+    target: CheckpointInfo
+    affected_messages: int
 
 
 def list_checkpoints(app, thread_id: str, *, limit: int = 50) -> list[CheckpointInfo]:
@@ -44,12 +52,13 @@ def list_checkpoints(app, thread_id: str, *, limit: int = 50) -> list[Checkpoint
                     values.get("pending_confirmations") or values.get("pending_shell")
                 ),
                 snapshot=snapshot,
+                checkpoint_id=_snapshot_checkpoint_id(snapshot),
             )
         )
     return out
 
 
-def rewind_to(app, thread_id: str, index: int) -> CheckpointInfo:
+def rewind_to(app, thread_id: str, index: int) -> RewindResult:
     """Create a new checkpoint from a historical snapshot."""
     current = app.get_state({"configurable": {"thread_id": thread_id}})
     current_values = getattr(current, "values", {}) or {}
@@ -64,12 +73,25 @@ def rewind_to(app, thread_id: str, index: int) -> CheckpointInfo:
     if index < 0 or index >= len(checkpoints):
         raise IndexError("checkpoint 序号超出范围")
     target = checkpoints[index]
+    # 回滚影响的消息条数：当前消息数 - 目标点消息数（<0 时归零，仅作展示提示）。
+    current_count = len(current_values.get("messages") or [])
+    affected = max(current_count - target.message_count, 0)
     values = dict(getattr(target.snapshot, "values", {}) or {})
     values["pending_confirmations"] = {}
     values["pending_shell"] = {}
     config = {"configurable": {"thread_id": thread_id}}
     _update_state(app, config, values)
-    return target
+    return RewindResult(target=target, affected_messages=affected)
+
+
+def find_checkpoint_index_by_id(app, thread_id: str, checkpoint_id: str) -> int | None:
+    """在当前 state history 中按 checkpoint_id 找回它的序号；找不到返回 None。"""
+    if not checkpoint_id:
+        return None
+    for cp in list_checkpoints(app, thread_id):
+        if cp.checkpoint_id == checkpoint_id:
+            return cp.index
+    return None
 
 
 def fork_thread(
@@ -143,6 +165,16 @@ def _snapshot_has_interrupt(snapshot) -> bool:
         if getattr(task, "interrupts", None):
             return True
     return False
+
+
+def _snapshot_checkpoint_id(snapshot) -> str:
+    """从快照的 config 中取 checkpoint_id（labels 反查需要它作为稳定引用）。"""
+    config = getattr(snapshot, "config", None)
+    if isinstance(config, dict):
+        configurable = config.get("configurable")
+        if isinstance(configurable, dict):
+            return str(configurable.get("checkpoint_id") or "")
+    return ""
 
 
 def _message_preview(message: HumanMessage) -> str | None:

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-11 · possibility-space phases 1.2–3.4
+
+### Added
+- **MCP health + profile autoconnect** (Phase 1.2): `_ServerEntry` tracks `status`/`last_checked`/`last_error`; `MCPClientManager.health_check()` probes with a 3s timeout. New `mcp_profile.py` persists connections to `~/.askanswer/mcp.json` (atomic writes); `cli._autoconnect_mcp_profile()` replays them on startup. New CLI: `/mcp add_stdio`, `/mcp health`, `/mcp list -v`. `registry.refresh_mcp()` drops `disconnected` servers' tools.
+- **Tenant isolation** (Phase 1.3): schema **v3** adds `tenant_id` to `thread_meta`+`audit_event` with per-tenant indexes. All persistence read methods take `tenant_id` (None = unrestricted); writes stamp it (default `ASKANSWER_TENANT_ID`). CLI commands pass `_current_tenant()`; `delete_thread` re-checks ownership. SQL agent connection cache keyed by `(tenant_id, dsn)`. `audit.begin_run` captures tenant per-run.
+- **/undo labels** (Phase 2.1): schema **v4** adds `checkpoint_label`. `/undo [n] --label NAME` names a restore point; `/undo --label NAME` resolves back to it; `/checkpoints` shows a label column and `/undo` reports affected message count.
+- **Observability exporters** (Phase 2.2): new `telemetry/` package with LangSmith + OpenTelemetry exporters, env-gated (`LANGSMITH_API_KEY` / `ASKANSWER_OTEL_EXPORTER`), zero-overhead when off. Contextvar span stack, LLM callback injected in `load.py`, tool-call events in `_react_internals`, root span in `stream_query`. No `SearchState` fields.
+- **research_brief subgraph** (Phase 3.1): `research/` package + `ResearchHandler`; `research_brief_loop` tool runs `plan_queries → search → synthesize → source_check`, calling `tavily_search` via the registry, and returns a cited Markdown brief.
+- **decision_memo subgraph** (Phase 3.2): `decision/` package + `DecisionHandler`; `decision_memo_loop` reuses Helix's `interview_node` then a `decide` node → tradeoff memo (`max_retries=0`).
+- **Helix as MCP server** (Phase 3.4): `helix_mcp.py` exposes `helix_spec_loop` over stdio via `FastMCP` (`python -m askanswer.helix_mcp`); no `graph.py` import, non-TTY falls back to `default_answer`.
+
+### Verified
+- `python -m py_compile` on all changed/new files.
+
 ## 2026-07-11
 
 ### Added

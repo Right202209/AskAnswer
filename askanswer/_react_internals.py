@@ -31,6 +31,27 @@ from .schema import ContextSchema
 from .state import SearchState
 
 
+def _emit_tool_telemetry(
+    *,
+    tool_name: str,
+    duration_ms: int | None = None,
+    error: str | None = None,
+) -> None:
+    """把一次工具调用发到 telemetry（独立于 audit 写入路径，共享最小 schema）。
+
+    lazy import：本模块顶层不依赖 telemetry（对齐 execution-plan 2.2 的不变量）；
+    telemetry 未启用时 ``emit_event`` 内部会立即返回，零开销。
+    """
+    from . import telemetry
+
+    telemetry.emit_event(
+        kind="tool_call",
+        tool_name=tool_name,
+        duration_ms=duration_ms,
+        error=error,
+    )
+
+
 def _reclassify_intent(state: SearchState) -> str | None:
     """根据“最新一条用户消息”重新判定 intent，让会话中途切换主题时也能换工具集。
 
@@ -194,6 +215,9 @@ def _tools_node(
                         duration_ms=duration_ms,
                         error=str(exc),
                     )
+                    _emit_tool_telemetry(
+                        tool_name=tc["name"], duration_ms=duration_ms, error=str(exc)
+                    )
                     out_messages.append(
                         ToolMessage(
                             content=f"工具 {tc['name']} 执行失败：{exc}",
@@ -218,6 +242,7 @@ def _tools_node(
                         result_size=len(str(content)),
                         duration_ms=duration_ms,
                     )
+                    _emit_tool_telemetry(tool_name=tc["name"], duration_ms=duration_ms)
                 out_messages.extend(result_messages)
 
         # 未知工具：返回“未注册”消息，让 LLM 下一轮换工具
@@ -316,13 +341,17 @@ def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
     # apply 内部会重新过安全闸门（用户可能编辑过内容），然后才真正执行
     started = time.monotonic()
     outcome = handler.apply(payload, decision, tool_call)
+    duration_ms = int((time.monotonic() - started) * 1000)
     log_event(
         kind=f"{clazz}_approve" if outcome.approved else f"{clazz}_reject",
         tool_name=tool_call["name"],
         args_summary=summarize_args(outcome.audit_args or handler.audit_args(payload)),
         result_size=len(outcome.content) if outcome.approved else None,
-        duration_ms=int((time.monotonic() - started) * 1000),
+        duration_ms=duration_ms,
         error=outcome.error,
+    )
+    _emit_tool_telemetry(
+        tool_name=tool_call["name"], duration_ms=duration_ms, error=outcome.error
     )
     return ToolMessage(
         content=outcome.content,

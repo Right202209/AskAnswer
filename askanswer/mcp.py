@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -21,6 +22,13 @@ from mcp.client.stdio import stdio_client
 # 安全的服务名字符集合 —— 用于把 URL 派生出可读、可作为前缀的服务名
 _NAME_SAFE = re.compile(r"[^a-zA-Z0-9_-]+")
 
+# 健康探测（list_tools）的超时秒数；超时即判定 server 失联。
+_HEALTH_TIMEOUT = 3.0
+
+# server 状态取值
+_STATUS_CONNECTED = "connected"
+_STATUS_DISCONNECTED = "disconnected"
+
 
 @dataclass
 class _ServerEntry:
@@ -32,6 +40,10 @@ class _ServerEntry:
     tools: list[dict[str, Any]]  # 启动时拉取到的工具列表
     _close_event: asyncio.Event  # 通知后台 task 退出 ctx manager 的事件
     _task: asyncio.Task = field(repr=False)  # 后台 runner task
+    # 健康状态：连接成功即 connected，探测失败转 disconnected。
+    status: str = _STATUS_CONNECTED
+    last_checked: int = 0          # 最近一次健康探测的 epoch 秒
+    last_error: str | None = None  # 最近一次探测失败的原因（成功时清空）
 
 
 class MCPClientManager:
@@ -164,9 +176,59 @@ class MCPClientManager:
                     "url": e.url,
                     "transport": e.transport,
                     "tools": len(e.tools),
+                    "status": e.status,
+                    "last_checked": e.last_checked,
+                    "last_error": e.last_error,
                 }
                 for e in self._servers.values()
             ]
+
+    def health_check(self, name: str | None = None) -> list[dict[str, Any]]:
+        """探测一个或全部 server 的健康状态并回写 ``status`` / ``last_error``。
+
+        探测方式：在后台 loop 上调用 ``session.list_tools()``，``_HEALTH_TIMEOUT``
+        秒内无响应即判定 ``disconnected``。成功时顺带刷新 tools 缓存，让工具增删
+        能被后续 ``registry.refresh_mcp()`` 感知。返回每个 server 的最新概要。
+        """
+        with self._lock:
+            entries = [
+                e for e in self._servers.values()
+                if name is None or e.name == name
+            ]
+        results: list[dict[str, Any]] = []
+        for entry in entries:
+            self._probe_entry(entry)
+            results.append(
+                {
+                    "name": entry.name,
+                    "url": entry.url,
+                    "transport": entry.transport,
+                    "tools": len(entry.tools),
+                    "status": entry.status,
+                    "last_checked": entry.last_checked,
+                    "last_error": entry.last_error,
+                }
+            )
+        return results
+
+    def _probe_entry(self, entry: _ServerEntry) -> None:
+        """对单个 server 做一次带超时的 list_tools 探测，原地更新健康字段。"""
+        entry.last_checked = int(time.time())
+        try:
+            tools = self._submit(self._health_probe_async(entry))
+        except Exception as exc:
+            entry.status = _STATUS_DISCONNECTED
+            entry.last_error = str(exc)
+            return
+        entry.tools = tools
+        entry.status = _STATUS_CONNECTED
+        entry.last_error = None
+
+    async def _health_probe_async(self, entry: _ServerEntry) -> list[dict[str, Any]]:
+        """在后台 loop 上执行带超时的工具列表拉取。"""
+        return await asyncio.wait_for(
+            self._collect_tools(entry.session), timeout=_HEALTH_TIMEOUT
+        )
 
     def list_tools(self, *, server: str | None = None) -> list[dict[str, Any]]:
         """跨所有 server 聚合工具列表。
@@ -419,6 +481,8 @@ class MCPClientManager:
             tools=tools,
             _close_event=close_event,
             _task=task,
+            status=_STATUS_CONNECTED,
+            last_checked=int(time.time()),
         )
 
     async def _call_tool_async(

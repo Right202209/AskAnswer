@@ -111,16 +111,31 @@ class _AuditedRunnable:
 
 
 def _inject_audit_callback(args: tuple, kwargs: dict) -> tuple[tuple, dict]:
-    """Append the audit callback to a RunnableConfig if one is present."""
-    config = None
+    """Append the audit (and, if enabled, telemetry) callback to a RunnableConfig."""
+    label = current_model_label()
     if len(args) >= 2:
-        config = args[1]
-        args = (args[0], with_llm_audit_callback(config, model_label=current_model_label()), *args[2:])
-        return args, kwargs
-    config = kwargs.get("config")
+        config = _augment_config(args[1], label)
+        return (args[0], config, *args[2:]), kwargs
     kwargs = dict(kwargs)
-    kwargs["config"] = with_llm_audit_callback(config, model_label=current_model_label())
+    kwargs["config"] = _augment_config(kwargs.get("config"), label)
     return args, kwargs
+
+
+def _augment_config(config, model_label: str) -> dict:
+    """Compose audit + telemetry callbacks onto one config (independent write paths)."""
+    cfg = with_llm_audit_callback(config, model_label=model_label)
+    telemetry_cb = _telemetry_callback(model_label)
+    if telemetry_cb is not None:
+        # with_llm_audit_callback 保证 cfg["callbacks"] 是一个全新的可变 list。
+        cfg["callbacks"].append(telemetry_cb)
+    return cfg
+
+
+def _telemetry_callback(model_label: str):
+    """Lazy import telemetry：顶层不依赖它，且未启用时返回 None（零开销）。"""
+    from . import telemetry
+
+    return telemetry.llm_callback(model_label)
 
 
 # 启动时的默认模型，可以通过 /model 命令运行时替换

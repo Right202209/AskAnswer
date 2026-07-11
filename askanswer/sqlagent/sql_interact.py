@@ -26,31 +26,42 @@ def get_database_uri(context: ContextSchema | dict | None = None) -> str:
     return database_uri
 
 
+def _cache_key(context: ContextSchema | dict | None = None) -> tuple[str | None, str]:
+    """连接缓存 key：``(tenant_id, dsn)``。
+
+    刻意把 tenant_id 纳入 key —— 即便两个租户配了相同 DSN，也各自持有独立的
+    SQLDatabase / toolkit / 工具实例，不共享连接池，避免跨租户串数据或串会话级
+    连接状态（对齐 execution-plan Phase 1.3：不同 tenant 不复用 connection cache）。
+    """
+    runtime_context = normalize_context(context)
+    return runtime_context.tenant_id, get_database_uri(runtime_context)
+
+
 @lru_cache(maxsize=16)
-def _get_database(database_uri: str) -> SQLDatabase:
-    """按 DSN 缓存 SQLDatabase 实例（连接池在内部维护）。"""
-    return SQLDatabase.from_uri(database_uri)
+def _get_database(cache_key: tuple[str | None, str]) -> SQLDatabase:
+    """按 (tenant, DSN) 缓存 SQLDatabase 实例（连接池在内部维护）。"""
+    return SQLDatabase.from_uri(cache_key[1])
 
 
 def get_database(context: ContextSchema | dict | None = None) -> SQLDatabase:
-    return _get_database(get_database_uri(context))
+    return _get_database(_cache_key(context))
 
 
 @lru_cache(maxsize=16)
-def _get_toolkit(database_uri: str) -> SQLDatabaseToolkit:
-    """按 DSN 缓存 LangChain 自带的 SQLDatabaseToolkit。"""
-    return SQLDatabaseToolkit(db=_get_database(database_uri), llm=model)
+def _get_toolkit(cache_key: tuple[str | None, str]) -> SQLDatabaseToolkit:
+    """按 (tenant, DSN) 缓存 LangChain 自带的 SQLDatabaseToolkit。"""
+    return SQLDatabaseToolkit(db=_get_database(cache_key), llm=model)
 
 
 def get_toolkit(context: ContextSchema | dict | None = None) -> SQLDatabaseToolkit:
-    return _get_toolkit(get_database_uri(context))
+    return _get_toolkit(_cache_key(context))
 
 
 @lru_cache(maxsize=16)
-def _get_sql_tools(database_uri: str) -> tuple[BaseTool, ...]:
+def _get_sql_tools(cache_key: tuple[str | None, str]) -> tuple[BaseTool, ...]:
     """组合 LangChain 自带工具 + 我们扩展的两个工具，整体缓存。"""
-    database = _get_database(database_uri)
-    toolkit = _get_toolkit(database_uri)
+    database = _get_database(cache_key)
+    toolkit = _get_toolkit(cache_key)
     return (
         *toolkit.get_tools(),
         # 自带 toolkit 的 schema 工具入参较繁琐，封装一个简单版
@@ -61,7 +72,7 @@ def _get_sql_tools(database_uri: str) -> tuple[BaseTool, ...]:
 
 
 def get_sql_tools(context: ContextSchema | dict | None = None) -> tuple[BaseTool, ...]:
-    return _get_sql_tools(get_database_uri(context))
+    return _get_sql_tools(_cache_key(context))
 
 
 def get_sql_tool(name: str, context: ContextSchema | dict | None = None) -> BaseTool:

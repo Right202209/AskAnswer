@@ -8,6 +8,7 @@ the CLI boundary.
 from __future__ import annotations
 
 import json
+import os
 import time
 from contextvars import ContextVar, Token
 from typing import Any
@@ -19,20 +20,32 @@ from .persistence import get_persistence
 
 _THREAD_ID: ContextVar[str | None] = ContextVar("askanswer_audit_thread_id", default=None)
 _PENDING: ContextVar[list[dict] | None] = ContextVar("askanswer_audit_pending", default=None)
+_TENANT_ID: ContextVar[str | None] = ContextVar("askanswer_audit_tenant_id", default=None)
 _FALLBACK_THREAD_ID: str | None = None
 
 
-def begin_run(thread_id: str) -> tuple[Token, Token]:
-    """Start collecting audit events for one graph run."""
+def begin_run(thread_id: str, *, tenant_id: str | None = None) -> tuple[Token, Token, Token]:
+    """Start collecting audit events for one graph run.
+
+    ``tenant_id`` is captured for the whole run so every event is attributed to
+    the same tenant even if the process-wide env var changes mid-run. When not
+    given, it falls back to ``ASKANSWER_TENANT_ID`` (may be ``None``).
+    """
     global _FALLBACK_THREAD_ID
     _FALLBACK_THREAD_ID = thread_id
-    return _THREAD_ID.set(thread_id), _PENDING.set([])
+    tenant = tenant_id if tenant_id is not None else (os.environ.get("ASKANSWER_TENANT_ID") or None)
+    return (
+        _THREAD_ID.set(thread_id),
+        _PENDING.set([]),
+        _TENANT_ID.set(tenant),
+    )
 
 
-def end_run(tokens: tuple[Token, Token]) -> None:
+def end_run(tokens: tuple[Token, Token, Token]) -> None:
     """Restore the previous audit context."""
     global _FALLBACK_THREAD_ID
-    thread_token, pending_token = tokens
+    thread_token, pending_token, tenant_token = tokens
+    _TENANT_ID.reset(tenant_token)
     _PENDING.reset(pending_token)
     _THREAD_ID.reset(thread_token)
     _FALLBACK_THREAD_ID = _THREAD_ID.get()
@@ -40,6 +53,10 @@ def end_run(tokens: tuple[Token, Token]) -> None:
 
 def current_thread_id() -> str | None:
     return _THREAD_ID.get() or _FALLBACK_THREAD_ID
+
+
+def current_tenant_id() -> str | None:
+    return _TENANT_ID.get()
 
 
 def summarize_args(args: Any, *, limit: int = 200) -> str:
@@ -84,6 +101,7 @@ def log_event(
         "duration_ms": duration_ms,
         "intent": intent,
         "error": error,
+        "tenant_id": current_tenant_id(),
     }
     pending = _PENDING.get()
     if immediate or pending is None:
@@ -126,6 +144,7 @@ def _persist(event: dict) -> None:
             duration_ms=event.get("duration_ms"),
             intent=event.get("intent"),
             error=event.get("error"),
+            tenant_id=event.get("tenant_id"),
         )
     except Exception:
         # Audit must never break the user-facing answer path.

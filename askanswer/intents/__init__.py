@@ -6,9 +6,11 @@ from collections.abc import Iterable
 
 from .base import IntentClassification, IntentHandler, extract_file_path
 from .chat import CHAT_STARTERS, ChatHandler
+from .decision import DecisionHandler
 from .file_read import FileReadHandler
 from .helix import HelixHandler
 from .math import MathHandler
+from .research import ResearchHandler
 from .search import SearchHandler
 from .sql import SqlHandler
 
@@ -99,7 +101,9 @@ for _handler in (
     FileReadHandler(),
     SqlHandler(),
     HelixHandler(),
+    DecisionHandler(),
     MathHandler(),
+    ResearchHandler(),
     SearchHandler(),
     ChatHandler(),
 ):
