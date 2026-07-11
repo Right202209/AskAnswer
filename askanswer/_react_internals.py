@@ -6,15 +6,15 @@
 
 * 普通工具调用走 ``langgraph.prebuilt.ToolNode``，由它统一处理并发执行、错误包装、
   以及 ``ToolRuntime`` 注入（这样 ``sql_query`` 等工具能拿到父图的 ``ContextSchema``）。
-* 注册时设置 ``confirmation_class="shell"`` 的工具（目前只有 ``gen_shell_commands_run``）
-  会先经过 ``_shell_plan_node`` 预先生成命令并写入 state，再由 ``_run_with_confirmation``
-  通过 ``interrupt()`` 暂停图、把命令交给 CLI 让人类确认。
+* 注册时设置 ``confirmation_class`` 的工具（shell / fs_write / external_api_paid）
+  会先经过 ``_confirm_plan_node`` 按类规划出“要执行的具体动作”写入 state，再由
+  ``_run_with_confirmation`` 通过 ``interrupt()`` 暂停图、交给 CLI 让人类确认。
+  每个确认类的规划/闸门/执行逻辑都在 ``confirmations.py``，这里只做通用分发。
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END
@@ -23,12 +23,12 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from .audit import log_event, summarize_args
+from .confirmations import get_confirmation_handler
 from .intents import get_intent_registry
 from .load import model
 from .registry import get_registry
 from .schema import ContextSchema
 from .state import SearchState
-from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 
 
 def _reclassify_intent(state: SearchState) -> str | None:
@@ -106,52 +106,31 @@ def _answer_node(state: SearchState) -> dict:
     return out
 
 
-def _shell_plan_node(state: SearchState) -> dict:
-    """对需要确认的工具调用，预先生成 shell 命令并写入 ``pending_shell``。
+def _confirm_plan_node(state: SearchState) -> dict:
+    """对需要确认的工具调用，按确认类预先规划动作并写入 ``pending_confirmations``。
 
     通过父图的 checkpointer 持久化下来：之后 ``interrupt()`` + 用户 resume 后
-    ``_tools_node`` 直接从 state 里读取已规划好的命令，避免重复调用 LLM
-    （否则不仅多花 token，还可能生成不一样的命令导致用户白确认一次）。
+    ``_tools_node`` 直接从 state 里读取已规划好的动作，避免重复调用 LLM
+    （否则不仅多花 token，还可能生成不一样的动作导致用户白确认一次）。
     """
     confirmation_classes = get_registry().confirmation_classes()
-    shell_names = {name for name, cls in confirmation_classes.items() if cls == "shell"}
-    plans: dict = dict(state.get("pending_shell") or {})
+    plans: dict = dict(state.get("pending_confirmations") or {})
     for tc in state["messages"][-1].tool_calls:
-        # 只处理 shell 类人工确认；其它确认类型不能复用 shell 规划器。
-        if tc["name"] not in shell_names:
+        clazz = confirmation_classes.get(tc["name"])
+        handler = get_confirmation_handler(clazz)
+        # 只处理已接入执行体的确认类；未接入的类型由 _tools_node 返回友好错误
+        if handler is None:
             continue
         # 已经规划过就不重复生成（resume 后再次进入此节点时跳过）
         if tc["id"] in plans:
             continue
-        # 工具入参里取自然语言指令；instruction 优先，input 兜底
-        instruction = (
-            (tc.get("args") or {}).get("instruction")
-            or (tc.get("args") or {}).get("input")
-            or ""
-        ).strip()
-        if not instruction:
-            plans[tc["id"]] = {
-                "command": "",
-                "explanation": "未提供 shell 指令",
-                "instruction": "",
-            }
-            continue
         try:
-            command, explanation = gen_shell_command_spec(instruction)
+            payload = handler.plan(tc)
         except Exception as exc:
-            # 生成失败也写入 plans，让后续节点据此返回友好错误而不是抛异常
-            plans[tc["id"]] = {
-                "command": "",
-                "explanation": f"生成 shell 命令失败：{exc}",
-                "instruction": instruction,
-            }
-            continue
-        plans[tc["id"]] = {
-            "command": command,
-            "explanation": explanation,
-            "instruction": instruction,
-        }
-    return {"pending_shell": plans}
+            # 规划失败也写入 plans，让后续节点据此返回友好错误而不是抛异常
+            payload = {"error": f"规划确认内容失败：{exc}"}
+        plans[tc["id"]] = {"class": clazz, **payload}
+    return {"pending_confirmations": plans}
 
 
 def _tools_node(
@@ -161,16 +140,20 @@ def _tools_node(
     """工具调用执行节点：把普通工具与需要确认的工具分别派发。"""
     registry = get_registry()
     confirmation_classes = registry.confirmation_classes()
-    shell_names = {name for name, cls in confirmation_classes.items() if cls == "shell"}
+    confirmable_names = {
+        name
+        for name, cls in confirmation_classes.items()
+        if get_confirmation_handler(cls) is not None
+    }
     last_msg = state["messages"][-1]
     tool_calls = list(getattr(last_msg, "tool_calls", None) or [])
 
     # 按是否需要 HITL 确认拆分
-    confirm_calls = [tc for tc in tool_calls if tc["name"] in shell_names]
+    confirm_calls = [tc for tc in tool_calls if tc["name"] in confirmable_names]
     unsupported_confirm_calls = [
         tc
         for tc in tool_calls
-        if tc["name"] in confirmation_classes and tc["name"] not in shell_names
+        if tc["name"] in confirmation_classes and tc["name"] not in confirmable_names
     ]
     plain_calls = [tc for tc in tool_calls if tc["name"] not in confirmation_classes]
 
@@ -275,8 +258,8 @@ def _tools_node(
     for tc in confirm_calls:
         out_messages.append(_run_with_confirmation(tc, state))
 
-    # 执行完后清空 pending_shell，避免下一轮被旧规划影响
-    return {"messages": out_messages, "pending_shell": {}}
+    # 执行完后清空规划缓存，避免下一轮被旧规划影响（pending_shell 是旧字段，一并清）
+    return {"messages": out_messages, "pending_confirmations": {}, "pending_shell": {}}
 
 
 def _route_from_answer(state: SearchState):
@@ -284,124 +267,68 @@ def _route_from_answer(state: SearchState):
     if state["step"] != "tool_called":
         return END
     confirmation_classes = get_registry().confirmation_classes()
-    shell_names = {name for name, cls in confirmation_classes.items() if cls == "shell"}
     tcs = getattr(state["messages"][-1], "tool_calls", None) or []
-    # 只要有一条 tool_call 需要确认，就先去 shell_plan 把命令规划出来
-    if any(tc.get("name") in shell_names for tc in tcs):
-        return "shell_plan"
+    # 只要有一条 tool_call 需要（已接入的）确认，就先去 confirm_plan 把动作规划出来
+    if any(
+        get_confirmation_handler(confirmation_classes.get(tc.get("name"))) is not None
+        for tc in tcs
+    ):
+        return "confirm_plan"
     return "tools"
 
 
 # ── HITL helpers ─────────────────────────────────────────────────────
 
 def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
-    """执行需要人工确认的工具调用：取出预生成命令、危险检查、interrupt 询问、执行。"""
-    plan = (state.get("pending_shell") or {}).get(tool_call["id"]) or {}
-    command = plan.get("command") or ""
-    explanation = plan.get("explanation") or ""
-    # 没规划出有效命令直接返回错误信息，不往后走
-    if not command:
-        log_event(
-            kind="shell_reject",
-            tool_name=tool_call["name"],
-            args_summary=summarize_args({"command": command, "reason": explanation}),
-            error=explanation or "empty command",
-        )
-        return ToolMessage(
-            content=explanation or "未能生成有效的 shell 命令",
-            tool_call_id=tool_call["id"],
-            name=tool_call["name"],
-        )
+    """执行需要人工确认的工具调用：取出预规划动作、安全闸门、interrupt 询问、执行。
 
-    # 用户确认前先做一次危险命令检查，避免诱导用户点 y 后造成损失
-    danger = check_dangerous(command)
-    if danger:
-        log_event(
-            kind="shell_reject",
-            tool_name=tool_call["name"],
-            args_summary=summarize_args({"command": command}),
-            error=f"dangerous command: {danger}",
-        )
-        return ToolMessage(
-            content=f"已拦截高风险命令（{danger}）：{command}",
-            tool_call_id=tool_call["id"],
-            name=tool_call["name"],
-        )
-
-    # interrupt() 抛出后，父图的 stream 会看到 __interrupt__ 通道，CLI 弹出确认 UI
-    decision = interrupt(
-        {
-            "type": "confirm_shell",
-            "command": command,
-            "explanation": explanation,
-            "instruction": plan.get("instruction", ""),
-        }
+    具体的规划/闸门/执行逻辑由确认类 handler（``confirmations.py``）提供，这里
+    只负责通用编排与审计（kind 形如 ``shell_approve`` / ``fs_write_reject``）。
+    """
+    clazz = get_registry().confirmation_classes().get(tool_call["name"]) or "shell"
+    handler = get_confirmation_handler(clazz)
+    plans = state.get("pending_confirmations") or {}
+    # 兼容升级前挂起的旧 checkpoint：老版本只写 pending_shell（必为 shell 类）
+    payload = (
+        plans.get(tool_call["id"])
+        or (state.get("pending_shell") or {}).get(tool_call["id"])
+        or {}
     )
-    # 用户可能修改了命令，需要重新做危险检查
-    approved, approved_command = _parse_decision(decision, fallback_command=command)
-    if not approved:
+
+    # 弹确认框之前先过安全闸门（规划失败 / 危险命令等），命中直接拦截
+    blocked = payload.get("error") or handler.gate(payload)
+    if blocked:
         log_event(
-            kind="shell_reject",
+            kind=f"{clazz}_reject",
             tool_name=tool_call["name"],
-            args_summary=summarize_args({"command": approved_command}),
+            args_summary=summarize_args(handler.audit_args(payload)),
+            error=blocked,
         )
         return ToolMessage(
-            content=f"已取消执行：{approved_command}",
+            content=blocked,
             tool_call_id=tool_call["id"],
             name=tool_call["name"],
         )
-    danger = check_dangerous(approved_command)
-    if danger:
-        log_event(
-            kind="shell_reject",
-            tool_name=tool_call["name"],
-            args_summary=summarize_args({"command": approved_command}),
-            error=f"dangerous command: {danger}",
-        )
-        return ToolMessage(
-            content=f"已拦截高风险命令（{danger}）：{approved_command}",
-            tool_call_id=tool_call["id"],
-            name=tool_call["name"],
-        )
-    # 真正执行命令；输出包装为 ToolMessage 回填到对话
+
+    # interrupt() 抛出后，父图的 stream 会看到 __interrupt__ 通道，CLI 按
+    # payload["type"]（confirm_<class>）弹出对应的确认 UI
+    decision = interrupt(handler.interrupt_payload(payload))
+    # apply 内部会重新过安全闸门（用户可能编辑过内容），然后才真正执行
     started = time.monotonic()
-    content = execute_shell_command(approved_command)
+    outcome = handler.apply(payload, decision, tool_call)
     log_event(
-        kind="shell_approve",
+        kind=f"{clazz}_approve" if outcome.approved else f"{clazz}_reject",
         tool_name=tool_call["name"],
-        args_summary=summarize_args({"command": approved_command}),
-        result_size=len(content),
+        args_summary=summarize_args(outcome.audit_args or handler.audit_args(payload)),
+        result_size=len(outcome.content) if outcome.approved else None,
         duration_ms=int((time.monotonic() - started) * 1000),
+        error=outcome.error,
     )
     return ToolMessage(
-        content=content,
+        content=outcome.content,
         tool_call_id=tool_call["id"],
         name=tool_call["name"],
     )
-
-
-def _parse_decision(decision: Any, fallback_command: str) -> tuple[bool, str]:
-    """把 CLI 的 resume 值统一解析成 (approved, command)。"""
-    # 直接传 True：批准，沿用旧命令
-    if decision is True:
-        return True, fallback_command
-    if isinstance(decision, dict):
-        # 字典形式：兼容 approve / value 两个键名
-        approve = decision.get("approve")
-        if approve is None:
-            approve = decision.get("value")
-        cmd = decision.get("command") or fallback_command
-        if isinstance(approve, bool):
-            return approve, cmd
-        return _truthy(approve), cmd
-    return _truthy(decision), fallback_command
-
-
-def _truthy(value: Any) -> bool:
-    """把字符串/None 等输入转换成布尔，用来兼容人类敲的 y/yes/1 等。"""
-    if value is None:
-        return False
-    return str(value).strip().lower() in {"y", "yes", "true", "1", "approve"}
 
 
 def _clone_message_with_calls(message: AIMessage, tool_calls: list[dict]) -> AIMessage:

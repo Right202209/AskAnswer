@@ -1,9 +1,10 @@
 """统一工具注册表：内置工具、MCP 工具、SQL 工具的唯一真相源。
 
 每个工具会贴上一个或多个 ``tags`` 标签（intent 名也是 tag），``answer`` 节点
-按当前 handler 的 tag 集合取工具绑定给 LLM。需要人工确认的工具（目前只有
-shell 工具）通过 ``confirmation_class`` 标记，react 子图会把它们路由到
-``shell_plan`` HITL 流程，而非走普通 ``ToolNode`` 直接执行。
+按当前 handler 的 tag 集合取工具绑定给 LLM。需要人工确认的工具通过
+``confirmation_class`` 标记（shell / fs_write / external_api_paid 三类均已接入
+执行体，见 ``confirmations.py``），react 子图会把它们路由到 ``confirm_plan``
+HITL 流程，而非走普通 ``ToolNode`` 直接执行。
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ class ToolDescriptor:
     tags: frozenset[str]
     # 来源标签，便于按前缀批量摘除（如 "mcp:" 重连时清掉旧的）
     source: str                       # "builtin" | "shell" | "sql" | "mcp:<server>"
-    # 需要哪类人工确认；当前仅 shell 类接入 HITL 执行体
+    # 需要哪类人工确认；三类的规划/闸门/执行体都在 confirmations.py
     confirmation_class: ConfirmationClass = "none"
 
     @property
@@ -119,7 +120,7 @@ class ToolRegistry:
             return {n for n, d in self._tools.items() if d.confirmation_class != "none"}
 
     def confirmation_classes(self) -> dict[str, str]:
-        """返回 tool name -> confirmation class。当前执行层只实现 shell。"""
+        """返回 tool name -> confirmation class（react 子图据此分发 HITL 流程）。"""
         with self._lock:
             return {
                 n: d.confirmation_class
@@ -187,6 +188,7 @@ def _seed_builtin(registry: ToolRegistry) -> None:
         pwd,
         read_file,
         tavily_search,
+        write_file,
     )
 
     # 普通工具：所有 bundle 都可见
@@ -212,6 +214,17 @@ def _seed_builtin(registry: ToolRegistry) -> None:
             tags=_SHELL_TAGS,
             source="shell",
             confirmation_class="shell",
+        )
+    )
+
+    # 写文件工具：仅暴露给 chat / file_read，落盘前必须经过 fs_write 人机确认
+    # （diff 预览 + 敏感路径/大小闸门），不给 search/sql/math/helix 流程误用的机会。
+    registry.register(
+        ToolDescriptor(
+            tool=write_file,
+            tags=frozenset({TAG_CHAT, TAG_FILE, "fs_write"}),
+            source="builtin",
+            confirmation_class="fs_write",
         )
     )
 

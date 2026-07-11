@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Sections
 
 - [Commands & Required env](.claude/mem/commands.md) — install, run, `--graph` export, verification (no test suite yet), env vars (`OPENAI_API_KEY`, `TAVILY_API_KEY`, `WLANGGRAPH_POSTGRES_DSN`, `ASKANSWER_DB_PATH`, …)
-- [Architecture — Orchestration](.claude/mem/architecture-orchestration.md) — main graph topology, `SearchState`, `ContextSchema`, parent nodes, react subgraph, shell HITL flow
+- [Architecture — Orchestration](.claude/mem/architecture-orchestration.md) — main graph topology, `SearchState`, `ContextSchema`, parent nodes, react subgraph, confirmation HITL flow (shell / fs_write / external_api_paid)
 - [Architecture — Extensibility](.claude/mem/architecture-extensibility.md) — `IntentHandler` protocol + `IntentRegistry` priorities, `ToolRegistry` tags & confirmation classes, MCP tool wrapping
 - [Architecture — Subgraphs as tools](.claude/mem/architecture-subgraphs.md) — SQL agent and Helix spec-loop, both exposed via the tool registry with `ToolRuntime` context passthrough
 - [Architecture — Runtime services](.claude/mem/architecture-runtime.md) — `_ModelProxy` hot swap, audit/pricing, SQLite persistence, time travel, MCP client manager, CLI/REPL streaming

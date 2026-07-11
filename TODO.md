@@ -12,7 +12,7 @@
 ## ⚡ P1 · 流式与交互体验
 
 - [ ] **token 级流式**：CLI 目前按节点粒度打印 `⏺ Node(detail)`，换成 `graph.astream(..., stream_mode=["updates","messages"])` 让 `answer` 节点的 token 边生成边打印（还能展示 tool_call 流）
-- [ ] **统一 HITL 入口**：目前只有 shell 走 `interrupt()`（`nodes.py:357`），把 `file_read`（覆盖已有大文件？）和未来写文件类工具都挂到同一个 HITL 协议上
+- [x] **统一 HITL 入口**：`confirmation_class` 三类（shell / fs_write / external_api_paid）均已接入 `confirmations.py` 执行协议；`pending_shell` 泛化为 `pending_confirmations`；CLI 按 `type` 分发确认菜单；`shell_plan` 节点更名 `confirm_plan`
 - [x] **/resume 与 /threads**：阶段 A 已实现（含 `/title` / `/delete`，挂起 interrupt 检测）。详见 [`docs/enterprise-persistence-plan.md`](docs/enterprise-persistence-plan.md) 阶段 A。
 - [x] **/undo**（time-travel）：已接入 `/checkpoints` / `/undo` / `/jump` / `/fork`，基于 LangGraph 的 `get_state_history` + `update_state`。详见 [`docs/enterprise-persistence-plan.md`](docs/enterprise-persistence-plan.md) 阶段 B。
 

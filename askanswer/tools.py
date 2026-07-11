@@ -1,7 +1,7 @@
 # 内置工具集合：天气、时间、计算、汇率、IP、读文件、联网搜索、shell 执行等。
 # 这里定义的每个 @tool 函数都会通过 registry.py 注册到统一工具表，
 # 然后由 react 子图按 intent 暴露给 LLM。
-import ast, csv, json, operator, re
+import ast, csv, difflib, json, operator, re
 import os
 import platform
 import shlex
@@ -245,6 +245,115 @@ def _validate_read_path(path: str) -> str | None:
     return None
 
 
+# write_file 安全限制：默认 1 MB，可通过环境变量 ASKANSWER_WRITE_FILE_MAX_BYTES 调整。
+# 写入内容会随规划一起进入 checkpoint（tool_call args），上限刻意比读取小一个量级。
+_WRITE_FILE_MAX_BYTES = int(os.environ.get("ASKANSWER_WRITE_FILE_MAX_BYTES") or 1024 * 1024)
+# fs_write 确认框里 diff / 预览的最大行数，超出截断
+_WRITE_DIFF_MAX_LINES = 200
+_WRITE_PREVIEW_MAX_LINES = 40
+
+
+def validate_write_path(path: str, content: str) -> str | None:
+    """写文件前的安全校验。返回错误字符串表示拒绝；None 表示放行。
+
+    与 ``_validate_read_path`` 同源的敏感路径正则 —— 能骗 LLM 读凭据的路径，
+    同样不允许被写入（覆盖 authorized_keys / .env 比读取更危险）。
+    在“规划确认内容”与“用户批准后执行”两个时机都会被调用（对齐 shell 的双重检查）。
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return "未提供文件路径"
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        return f"路径解析失败：{exc}"
+    # 同时检查原始路径与解析后路径，避免符号链接绕过
+    for candidate in {raw, str(resolved)}:
+        if _SENSITIVE_PATH_RE.search(candidate):
+            return f"已拒绝写入敏感文件：{Path(candidate).name}"
+    if resolved.exists() and not resolved.is_file():
+        return f"路径已存在且不是普通文件：{raw}"
+    parent = resolved.parent
+    if not parent.is_dir():
+        # 刻意不自动创建目录：目录级副作用应该由用户显式完成
+        return f"父目录不存在：{parent}"
+    size = len(content.encode("utf-8", errors="replace"))
+    if size > _WRITE_FILE_MAX_BYTES:
+        return (
+            f"写入内容过大（{size} 字节 > 上限 {_WRITE_FILE_MAX_BYTES}）；"
+            f"如需写入，调整 ASKANSWER_WRITE_FILE_MAX_BYTES 环境变量。"
+        )
+    return None
+
+
+def describe_write(path: str, content: str) -> dict:
+    """生成 fs_write 确认框所需的展示信息：是否覆盖、大小、diff 或内容预览。
+
+    只返回“派生信息”—— 完整 content 已随 tool_call args 存在 checkpoint 的消息
+    历史里，这里不再复制一份，避免 pending_confirmations 膨胀。
+    """
+    target = Path((path or "").strip()).expanduser().resolve()
+    exists = target.is_file()
+    try:
+        size_before = target.stat().st_size if exists else 0
+    except OSError:
+        size_before = 0
+    diff = ""
+    if exists:
+        try:
+            old_text = target.read_text(encoding="utf-8", errors="replace")
+            diff_lines = list(
+                difflib.unified_diff(
+                    old_text.splitlines(),
+                    content.splitlines(),
+                    fromfile=f"{path}（当前）",
+                    tofile=f"{path}（写入后）",
+                    lineterm="",
+                )
+            )
+            if len(diff_lines) > _WRITE_DIFF_MAX_LINES:
+                omitted = len(diff_lines) - _WRITE_DIFF_MAX_LINES
+                diff_lines = diff_lines[:_WRITE_DIFF_MAX_LINES] + [
+                    f"…（diff 已截断，省略 {omitted} 行）"
+                ]
+            diff = "\n".join(diff_lines) if diff_lines else "（内容无变化）"
+        except Exception:
+            # 旧文件读不出来（如二进制）就退化为内容预览
+            diff = ""
+    preview = ""
+    if not diff:
+        lines = content.splitlines()
+        preview = "\n".join(lines[:_WRITE_PREVIEW_MAX_LINES])
+        if len(lines) > _WRITE_PREVIEW_MAX_LINES:
+            preview += f"\n…（预览已截断，共 {len(lines)} 行）"
+    return {
+        "exists": exists,
+        "size_before": size_before,
+        "size_after": len(content.encode("utf-8", errors="replace")),
+        "diff": diff,
+        "preview": preview,
+    }
+
+
+@tool
+def write_file(path: str, content: str) -> str:
+    """
+    把文本内容写入指定文件（新建或覆盖已有文件）。
+    敏感路径（.env、SSH 密钥、凭据等）会被自动拦截；
+    写入前会暂停图流程，向用户展示 diff / 内容预览，用户确认后才真正落盘。
+    参数：path 目标文件路径；content 要写入的完整文本内容。
+    """
+    # 正常情况下，此工具的 tool_call 会被 tools_node 拦截并走 fs_write 人机确认流程；
+    # 这里仅作为“脱离图流程被直接调用”时的兜底，不落盘、要求使用图入口。
+    error = validate_write_path(path, content)
+    if error:
+        return error
+    return (
+        "此工具需在图流程中运行以获得用户确认。\n"
+        f"拟写入：{path}（{len(content.encode('utf-8', errors='replace'))} 字节）"
+    )
+
+
 @tool
 def tavily_search(query: str) -> str:
     """联网搜索实时或最新信息。参数 query 为搜索关键词，返回 Top 5 网页摘要与 Tavily 综合回答。"""
@@ -461,6 +570,7 @@ tools = [
     convert_currency,
     lookup_ip,
     read_file,
+    write_file,
     tavily_search,
     pwd,
     gen_shell_commands_run,

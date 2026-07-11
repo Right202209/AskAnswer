@@ -327,13 +327,14 @@ def _marker(title: str, detail: str = "", elapsed: float | None = None) -> str:
 
 # 节点 → spinner 显示文案的映射；未列出的节点用兜底文案。
 _PHASE_TEXT = {
-    "understand":  "理解意图…",
-    "answer":      "思考中…",
-    "tools":       "执行工具…",
-    "shell_plan":  "规划 shell 命令…",
-    "search":      "联网搜索…",
-    "file_read":   "读取文件…",
-    "sorcery":     "评估答案质量…",
+    "understand":    "理解意图…",
+    "answer":        "思考中…",
+    "tools":         "执行工具…",
+    "confirm_plan":  "规划待确认操作…",
+    "shell_plan":    "规划 shell 命令…",
+    "search":        "联网搜索…",
+    "file_read":     "读取文件…",
+    "sorcery":       "评估答案质量…",
 }
 
 
@@ -424,7 +425,7 @@ def stream_query(
             # HITL：暂停 spinner 让用户看清楚要确认的命令；resume 后再启动新一轮。
             spinner.stop()
             _close_live(live_state)
-            resume_value = _prompt_shell_confirmation(interrupt_payload)
+            resume_value = _prompt_confirmation(interrupt_payload)
             graph_input = Command(resume=resume_value)
             spinner = Spinner("继续执行…")
             spinner.start()
@@ -634,10 +635,10 @@ def _render_node_update(
             print(_marker("Sorcery", "通过", elapsed))
     elif node == "tools":
         print(_marker("Tools", "执行工具调用", elapsed))
-    elif node == "shell_plan":
-        plans = update.get("pending_shell") or {}
-        detail = f"生成 {len(plans)} 条命令" if plans else "规划完成"
-        print(_marker("ShellPlan", detail, elapsed))
+    elif node in ("confirm_plan", "shell_plan"):
+        plans = update.get("pending_confirmations") or update.get("pending_shell") or {}
+        detail = f"规划 {len(plans)} 项确认" if plans else "规划完成"
+        print(_marker("Confirm", detail, elapsed))
     else:
         # 兜底：未知节点也给一行标记，至少能看到流转
         print(_marker(node, "", elapsed))
@@ -670,6 +671,79 @@ def _pending_interrupt(app, config):
             first = interrupts[0]
             return getattr(first, "value", first)
     return None
+
+
+def _prompt_confirmation(payload) -> dict:
+    """按确认类型分发到对应的 CLI 确认菜单。"""
+    data = payload if isinstance(payload, dict) else {}
+    confirm_type = data.get("type") or ""
+    if confirm_type == "confirm_fs_write":
+        return _prompt_fs_write_confirmation(data)
+    if confirm_type == "confirm_external_api_paid":
+        return _prompt_paid_confirmation(data)
+    return _prompt_shell_confirmation(payload)
+
+
+def _prompt_fs_write_confirmation(data: dict) -> dict:
+    """文件写入确认菜单：展示路径、大小变化、diff 预览。"""
+    path = data.get("path") or "(unknown)"
+    exists = data.get("exists", False)
+    size_after = data.get("size_after") or 0
+    diff_text = data.get("diff") or ""
+    preview_text = data.get("preview") or ""
+
+    print()
+    print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}需要确认文件写入{C.RESET}")
+    print(f"    {C.DIM}路径：{C.RESET}{C.CYAN}{path}{C.RESET}")
+    mode = "覆盖已有文件" if exists else "新建文件"
+    print(f"    {C.DIM}操作：{C.RESET}{mode}，写入后 {size_after} 字节")
+
+    if diff_text:
+        print()
+        for line in diff_text.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                print(f"    {C.GREEN}{line}{C.RESET}")
+            elif line.startswith("-") and not line.startswith("---"):
+                print(f"    {C.RED}{line}{C.RESET}")
+            elif line.startswith("@@"):
+                print(f"    {C.CYAN}{line}{C.RESET}")
+            else:
+                print(f"    {C.DIM}{line}{C.RESET}")
+    elif preview_text:
+        print()
+        for line in preview_text.splitlines():
+            print(f"    {C.DIM}{line}{C.RESET}")
+
+    idx, _ = select_option(
+        ["写入", "取消"],
+        prompt="选择操作（↑/↓ 导航 · Enter 确认）：",
+        default=1,
+    )
+    return {"approve": idx == 0}
+
+
+def _prompt_paid_confirmation(data: dict) -> dict:
+    """付费外部 API 调用确认菜单。"""
+    tool_name = data.get("tool") or "(unknown)"
+    source = data.get("source") or ""
+    tool_args = data.get("args") or {}
+
+    print()
+    print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}需要确认付费工具调用{C.RESET}")
+    print(f"    {C.DIM}工具：{C.RESET}{C.CYAN}{tool_name}{C.RESET}")
+    if source:
+        print(f"    {C.DIM}来源：{C.RESET}{source}")
+    if tool_args:
+        args_str = json.dumps(tool_args, ensure_ascii=False, default=str)
+        print(f"    {C.DIM}参数：{C.RESET}{_truncate(args_str, 72)}")
+    print(f"    {C.GOLD}⚠ 此调用可能产生费用{C.RESET}")
+
+    idx, _ = select_option(
+        ["调用", "取消"],
+        prompt="选择操作（↑/↓ 导航 · Enter 确认）：",
+        default=1,
+    )
+    return {"approve": idx == 0}
 
 
 def _prompt_shell_confirmation(payload) -> dict:
@@ -1116,7 +1190,7 @@ def _resolve_thread(arg: str) -> ThreadMeta | None:
 
 
 def _has_pending_interrupt(app, thread_id: str) -> bool:
-    """检测某 thread 是否还有挂起的 ``interrupt()`` 任务（shell HITL 没收尾）。"""
+    """检测某 thread 是否还有挂起的 ``interrupt()`` 任务（HITL 确认没收尾）。"""
     if app is None:
         return False
     try:
@@ -1214,7 +1288,7 @@ def handle_resume_command(args: str, *, current: str, app=None) -> str | None:
     if _has_pending_interrupt(app, target.thread_id):
         print()
         print(
-            f"  {C.GOLD}⚠ 该会话上次中断在 shell 确认未完成。{C.RESET}\n"
+            f"  {C.GOLD}⚠ 该会话上次中断在确认操作未完成。{C.RESET}\n"
             f"    {C.DIM}下一条问题会作为新一轮开始；挂起的确认会被 LangGraph 保留，"
             f"行为可能怪异。{C.RESET}\n"
             f"    {C.DIM}如需先恢复挂起项，请取消本次切换并直接在原会话回答 y/N。{C.RESET}"
@@ -1373,8 +1447,8 @@ def handle_checkpoints_command(args: str, *, thread_id: str, app=None) -> None:
         flags = []
         if cp.index == 0:
             flags.append("[success]latest[/]")
-        if cp.pending_shell:
-            flags.append("[warning]pending-shell[/]")
+        if cp.pending_confirm:
+            flags.append("[warning]pending-confirm[/]")
         table.add_row(
             str(cp.index),
             cp.node,
@@ -1589,6 +1663,7 @@ def handle_import_command(args: str, *, app=None) -> str | None:
         return None
     values = dict(payload.get("values") or {})
     values["messages"] = messages
+    values["pending_confirmations"] = {}
     values["pending_shell"] = {}
     new_id = str(uuid.uuid4())
     try:
@@ -1813,7 +1888,7 @@ def _thread_export_payload(
     state_values = {
         key: value
         for key, value in values.items()
-        if key not in {"messages", "pending_shell"}
+        if key not in {"messages", "pending_shell", "pending_confirmations"}
     }
     return {
         "version": 1,

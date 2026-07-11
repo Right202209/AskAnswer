@@ -17,4 +17,6 @@ class SearchState(TypedDict):
     intent: str          # 用户意图类别：file_read | search | chat | sql | math | 插件 intent
     file_path: str       # 当意图为 file_read 时，从用户输入提取出的目标文件路径
     retry_directive: dict # sorcery 给下一轮 answer 的结构化重试指令，answer 消费后清空
-    pending_shell: dict  # {tool_call_id: {command, explanation, instruction}}，HITL（人机确认）时跨 interrupt 持久化
+    pending_confirmations: dict  # {tool_call_id: {"class": shell|fs_write|external_api_paid, ...规划载荷}}，
+                                 # HITL（人机确认）时跨 interrupt 持久化，tools 节点消费后清空
+    pending_shell: dict  # 旧版 shell 专用规划缓存；仅为兼容旧 checkpoint 保留，新代码一律写 pending_confirmations
