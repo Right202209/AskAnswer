@@ -19,6 +19,7 @@ external_api_paid）各自实现同一套四步协议，react 子图按类分发
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,35 @@ from .tools import (
     gen_shell_command_spec,
     validate_write_path,
 )
+
+
+# 审计脱敏：命中这些 key 的参数值不落库（UI 确认框仍显示原值，用户需据实批准）。
+_SENSITIVE_KEY = re.compile(
+    r"(?:^|[_-])(?:api[_-]?key|key|token|secret|password|passwd|authorization|auth|credential)s?$",
+    re.IGNORECASE,
+)
+# 参数值里出现的 email 一律打码（execution-plan 3.5：审计去 token/email 等）。
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_REDACTED = "***"
+_MAX_REDACT_DEPTH = 4
+
+
+def redact_audit_args(args: Any, _depth: int = 0) -> Any:
+    """递归脱敏审计参数：敏感 key 的值整体打码，字符串值内的 email 打码。"""
+    if _depth >= _MAX_REDACT_DEPTH:
+        return _REDACTED
+    if isinstance(args, dict):
+        return {
+            key: _REDACTED
+            if _SENSITIVE_KEY.search(str(key))
+            else redact_audit_args(value, _depth + 1)
+            for key, value in args.items()
+        }
+    if isinstance(args, (list, tuple)):
+        return [redact_audit_args(item, _depth + 1) for item in args]
+    if isinstance(args, str):
+        return _EMAIL.sub(_REDACTED, args)
+    return args
 
 
 @dataclass(frozen=True)
@@ -244,11 +274,14 @@ class PaidApiConfirmation:
         }
 
     def audit_args(self, payload: dict) -> dict:
-        return {"tool": payload.get("tool") or "", "args": payload.get("args") or {}}
+        return {
+            "tool": payload.get("tool") or "",
+            "args": redact_audit_args(payload.get("args") or {}),
+        }
 
     def apply(self, payload: dict, decision: Any, tool_call: dict) -> ConfirmationOutcome:
         name = payload.get("tool") or tool_call.get("name") or ""
-        audit = {"tool": name, "args": payload.get("args") or {}}
+        audit = {"tool": name, "args": redact_audit_args(payload.get("args") or {})}
         if not parse_approval(decision):
             return ConfirmationOutcome(
                 content=f"已取消调用付费工具：{name}", approved=False, audit_args=audit

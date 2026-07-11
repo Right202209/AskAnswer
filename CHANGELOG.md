@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-11 · audit redaction for paid-API confirmations
+
+### Security
+- `external_api_paid` confirmations now redact sensitive values from the audit trail (`args_summary`): keys matching api_key/token/secret/password/authorization/credential are masked, and email addresses inside string values are scrubbed, on both approve and reject paths (`confirmations.redact_audit_args`). The interactive confirmation UI still shows raw args so the user approves what actually runs.
+
 ## 2026-07-11 · possibility-space phases 1.2–3.4
 
 ### Added
