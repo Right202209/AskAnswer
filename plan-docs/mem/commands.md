@@ -12,11 +12,11 @@ The `askanswer` entry point installed by `pip install -e .` only resolves inside
 
 ## Commands
 
-- Install (editable, inside the activated venv): `pip install -e .` (Python 3.10+)
+- Install (editable, inside the activated venv): `pip install -e .` (Python 3.10+); add dev tooling with `pip install -e ".[dev]"` (pytest + ruff)
 - Run CLI: `askanswer "<question>"` (single-shot) · `askanswer` (REPL) · `python -m askanswer`
 - Run HTTP/SSE server: `python -m askanswer.server [--host 127.0.0.1] [--port 8765]` (or `askanswer-server` after reinstall; optional `ASKANSWER_SERVER_TOKEN` enables bearer auth — endpoints/events in `docs/important-documentation-c3-http-sse-server.md`)
 - Export the LangGraph topology: `askanswer --graph` (stdout) or `askanswer --graph docs/graph.mmd`
-- No test suite or linter is wired up yet; do not invent commands for them. The repo is verified by `python -m compileall askanswer` + manual smoke checks documented in `CHANGELOG.md`.
+- Test / lint (both run with **no API key** — LLM/network mocked, env isolated): `pytest -q` (107 cases across persistence/confirmations/mcp_profile/telemetry/registry/intents/graph) · `ruff check askanswer tests` (E/F/I baseline; `--fix` to autofix). Legacy spot check: `python -m compileall askanswer`.
 
 ## Required env (`.env` at repo root)
 
