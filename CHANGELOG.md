@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-07-12 · HTTP/SSE server (C3)
+
+### Added
+- `askanswer/runner.py`: UI-free event stream over one graph "leg" — typed `RunEvent`s (`token` / `tool` / `node` / `interrupt` / `final`) mirroring `cli.stream_query` consumption semantics. `run_leg` wraps the stream with the CLI-parity bookkeeping (audit `begin_run`/`flush_pending`/`end_run`, telemetry root span, `thread_meta` upsert) inside a generator `finally`, so client disconnects still get accounted. `runtime_context_from_env()` is now the single env→`ContextSchema` mapping.
+- `askanswer/server.py`: stdlib-only `ThreadingHTTPServer` + SSE, zero new dependencies (`python -m askanswer.server`; `askanswer-server` script after reinstall). Endpoints: `GET /health`, `GET /v1/interrupt?thread_id=`, `POST /v1/query`, `POST /v1/resume`. HITL over HTTP: the stream ends at the `interrupt` event with `done.status=interrupted` (pause persisted by the shared checkpointer); `/v1/resume` continues with the same decision shapes the CLI uses. Guards: optional `ASKANSWER_SERVER_TOKEN` bearer auth (`compare_digest`), localhost-only `Origin` + JSON-only content type (CSRF double gate), 64KB body cap, 2-slot run semaphore (503), per-thread busy lock (409), 60s socket timeout, generic error bodies (stacks server-log only).
+- `askanswer/wire.py`: transport helpers — SSE framing, `event_wire` (node updates → scalar-only summaries; interrupt payloads → depth-capped `json_safe`), request validation (`RequestError`, `normalize_thread_id`, `split_path`, `is_local_origin`).
+
+### Changed
+- `cli._runtime_context` now delegates to `runner.runtime_context_from_env()` — one env→context mapping shared by CLI and HTTP. No other CLI behavior change; `stream_query` still owns its own loop until the C1 split rewires it onto the runner.
+
+### Verification
+- **Not yet run** (code-only session). Matrix groups G5+G6+G7 in `docs/important-documentation-verification-matrix.md` gate C3 acceptance; the C3 box in `plan-docs/02-execution-plan.md` stays unchecked until they pass.
+
 ## 2026-07-12 · generic clarification protocol (C2)
 
 ### Added

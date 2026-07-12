@@ -55,6 +55,7 @@ from .persistence import (
 )
 from .pricing import estimate_cost_usd, format_cost
 from .registry import get_registry
+from .runner import runtime_context_from_env
 from .schema import ContextSchema
 from .timetravel import (
     _update_state,
@@ -466,12 +467,8 @@ def _close_root_span(handle) -> None:
 
 
 def _runtime_context() -> ContextSchema:
-    """从环境变量构造一份 ContextSchema 传给图（CLI 是参数注入的边界）。"""
-    return ContextSchema(
-        db_dsn=os.getenv("WLANGGRAPH_POSTGRES_DSN") or None,
-        db_dialect=os.getenv("ASKANSWER_DB_DIALECT") or None,
-        tenant_id=_current_tenant(),
-    )
+    """从环境变量构造一份 ContextSchema 传给图（env→context 的统一口径在 runner，CLI/HTTP 共用）。"""
+    return runtime_context_from_env()
 
 
 def stream_query(

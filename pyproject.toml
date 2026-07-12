@@ -28,6 +28,8 @@ dev = [
 
 [project.scripts]
 askanswer = "askanswer.cli:main"
+# 重新 pip install -e 前也可用 `python -m askanswer.server` 启动（server.py 带 __main__ 守卫）。
+askanswer-server = "askanswer.server:main"
 
 [tool.setuptools.packages.find]
 include = ["askanswer*"]
