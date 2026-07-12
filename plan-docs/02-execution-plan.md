@@ -9,16 +9,20 @@
 - [x] A1 冒烟验证矩阵（8 项全过 + v2→v4 旧库无损升级验证）
 - [x] A2 安全清单审查（发现并修复：paid-API 审计参数未脱敏 → `redact_audit_args`）
 - [x] A3 提交在途工作 + 本计划（89b7ea8 / e855cb8 / 6c94d42）
-- [ ] B1 pytest/ruff 基建
-- [ ] B2 测试套件（≥25 用例）
-- [ ] B3 lint 基线 + 文档回写
-- [ ] B4 CI（如有远端；否则记 N/A）
+- [x] B0 修复无 key 导入阻塞 + 补齐缺失依赖（19355ff / 153427a）—— B 的前置，见下方说明
+- [x] B1 pytest/ruff 基建（92ee5fa）
+- [x] B2 测试套件（107 用例 / 7 文件，无 API key 可跑）（d8cebca）
+- [x] B3 lint 基线 + 文档回写（9483ee6 / b1258b3）
+- [x] B4 CI（GitHub Actions，ruff + pytest，py3.10/3.12）（f1409b2）
 - [ ] C1 拆分 cli.py（runner/renderer/commands）
-- [ ] C2 通用澄清能力
-- [ ] C3 HTTP/SSE server
-- [ ] C4 只读 Web UI
+- [x] C2 通用澄清能力（a106a57）—— ⚠ 早于 C1 落地（偏离原定顺序）
+- [x] C3 HTTP/SSE server（b0c862d）—— ⚠ 早于 C1 落地：runner.py 已抽出，但 cli.py 尚未成包
+- [ ] C4 只读 Web UI（web/ 已有静态页，缺 JSON endpoint）
 
 依赖：A 内部顺序执行；B 依赖 A3；C1 依赖 B 全部；C3 依赖 C1；C4 依赖 C3。
+**执行偏离（如实记录）**：C2、C3 在 B2–B4 与 C1 之前就已提交（`runner.py` 为 C3 提前抽出，
+但 `cli.py` 仍是 2510 行的单文件、未拆成包）。因此 C1 现在是「补做欠账」：既是 300 行上限的
+存量债，也让 C3 的 runner 与 CLI 真正共用一套事件流。Milestone B 已回填完成并全绿。
 
 ---
 
@@ -64,11 +68,26 @@
 
 ## Milestone B · Harden（安全网）
 
+> **状态：已完成并全绿**（`ruff check askanswer tests` + `pytest -q` = 107 passed）。
+> 下面各小节保留原始设计意图，并在末尾补「实际落地」。
+
+### B0 前置修复（B 开工时发现）
+
+原计划假设「包可无 API key 导入」（spec §5 冒烟第 1 项），但 `load.py` 在**导入时**就
+`init_chat_model` 构造 backend，缺 `OPENAI_API_KEY` 直接抛错——挡住了 B2/B4 与 CI。另外
+`langchain-openai`、`langchain-community` 被 import 却未在 `pyproject` 声明（后者缺失时
+`sql_query` 被静默跳过）。修复：
+
+- `_ModelProxy` 惰性构造 backend（首次 invoke/stream/bind_tools 时才建；`/model` 热替换不变）。
+- `pyproject` 补 `langchain-openai` / `langchain-community` 两条依赖。
+- 提交：`19355ff`（惰性模型 + 去掉未用的 `OpenAI` import）、`153427a`（补 community 依赖）。
+
 ### B1 测试与 lint 基建
 
 - `pyproject.toml` 加 `[project.optional-dependencies] dev = ["pytest", "ruff"]`；`pip install -e ".[dev]"`。
 - 建 `tests/__init__.py` 不需要；`tests/conftest.py` 提供 fixture：临时 `ASKANSWER_DB_PATH`、隔离 env（清掉 TENANT/LANGSMITH/OTEL 变量）。
 - 提交：`chore: add pytest+ruff dev tooling`。
+- **实际落地**：`92ee5fa`（conftest 提供 `_isolated_env` autouse + `pm` 临时库 fixture）。
 
 ### B2 测试套件（把 A1 矩阵固化 + 加深）
 
@@ -85,24 +104,28 @@
 | `tests/test_graph.py` | mermaid 拓扑 golden 快照；import `graph` 不触发 persistence |
 
 **验收**：`pytest -q` 全绿、≥25 用例。提交：`test: cover persistence, confirmations, mcp profile, telemetry, registry`（可按文件拆多条提交）。
+- **实际落地**：`d8cebca`，7 文件共 **107 用例**全绿；无 API key 运行（`sql_query` 依赖 community，已在 B0 补齐）。
 
 ### B3 lint 基线 + 文档回写
 
 - `[tool.ruff]` target py310；先跑 `ruff check askanswer --statistics` 看噪声，选可全绿的规则集（至少 E/F/I），autofix + 少量手工修复；不做行为性改动。
 - 回写 `.claude/mem/commands.md`：删除「没有测试/linter」的说明，写上 `pytest -q`、`ruff check askanswer`。
 - 提交：`chore: ruff baseline` + `docs: record test/lint commands`。
+- **实际落地**：`9483ee6`（E/F/I，忽略 E501；autofix 跨 36 文件仅动 import；手工把 `registry.py` 的 mid-file `import os` 上移）+ `b1258b3`（回写 `plan-docs/mem/commands.md`；`.claude/mem/commands.md` 同步更新但被 gitignore）。
 
 ### B4 CI
 
 `git remote -v` 有 GitHub 远端才做：`.github/workflows/ci.yml` = ruff + pytest（Python 3.10/3.12 矩阵）。无远端则在本文件勾选框旁标 `N/A` 并说明。
+- **实际落地**：远端存在（`git@github.com:Right202209/AskAnswer.git`）→ `f1409b2` 加 `.github/workflows/ci.yml`（push/PR to master，py3.10/3.12 矩阵，`pip install -e ".[dev]"` → ruff → pytest）。
 
 ---
 
 ## Milestone C · Evolve（形态演进，B 完成后逐个开工）
 
-### C1 拆分 `cli.py`（2466 行 → 包）
+### C1 拆分 `cli.py`（2510 行 → 包）
 
 目标结构：`askanswer/cli/` 包 —— `__init__.py`（main 入口，≤100 行）、`runner.py`（graph 事件流，纯逻辑无 UI）、`render.py`（rich 渲染）、`commands/`（slash 命令按域拆：threads/timetravel/mcp/audit/misc）。约束：纯移动+拆函数，不改行为；B2 测试全绿即验收；每个新文件 ≤300 行。提交：`refactor: split cli into runner/render/commands package`。
+- **注意（当前状态）**：C3 已提前抽出顶层 `askanswer/runner.py`（graph 事件流），CLI 与 HTTP server 都消费它；但 `cli.py` 仍是 2510 行单文件。C1 = 把 `cli.py` 拆成 `askanswer/cli/` 包并复用已有 `runner.py`（避免再造一份事件流），render/commands 从 `cli.py` 迁出。B2 的 107 个测试是这次纯移动重构的回归网。
 
 ### C2 通用澄清能力
 
