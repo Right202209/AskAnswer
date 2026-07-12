@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-07-12 · split cli into package (C1)
+
+### Changed
+- `askanswer/cli.py` (2510-line single file) is now an `askanswer/cli/` package — one cohesive module per concern, every file ≤300 lines: `theme`/`text` (styling + text-measure primitives), `render`/`progress` (panels + `⏺` node markers), `confirm` (HITL menus), `stream` (`stream_query`), `repl` (`interactive_loop` + `!<cmd>`), `app` (parser / `--graph` export / MCP autoconnect / telemetry init), and `commands/` (router `__init__` + `model`/`mcp`(+`mcp_view`)/`threads`/`timetravel`/`audit`/`transfer` + shared `_common`). `cli/__init__.py` (92 lines) keeps `main` plus back-compat re-exports, so `from askanswer.cli import main/stream_query/handle_command/render_answer/…` and the `askanswer` / `askanswer.cli:main` entry points are unchanged.
+- `cli.stream.stream_query` now consumes `runner.stream_leg` directly instead of driving its own `app.stream(["updates","messages"])` loop — closing the C1 goal of a single event-stream implementation shared by CLI and HTTP (the CLI's `_handle_message_chunk` / `_extract_interrupt_value` / `_pending_interrupt` duplicates are gone; their logic already lives in `runner`). Turn-level bookkeeping (audit `begin_run`/`end_run`, telemetry root span, `thread_meta` upsert) stays in the CLI, so multi-leg audit granularity is unchanged. Behavior-preserving for all real (dict) interrupt payloads.
+
+### Added
+- `tests/test_cli_stream.py` (5 cases): locks `runner.stream_leg`'s event contract (token/tool/node/interrupt/final ordering, interrupt-without-final, state fallback) and `stream_query`'s consumption mapping (streamed answer, confirmation prompt + resume). This seam was previously untested; it also guards the HTTP server, which shares `runner`.
+
+### Verification
+- `pytest -q` = **112 passed** (107 pre-existing + 5 new); `ruff check askanswer tests` clean; `askanswer --graph -` exports nodes; command/render paths smoke-tested against a temp DB. Pure structural move + the documented runner convergence — no user-facing behavior change.
+
 ## 2026-07-12 · HTTP/SSE server (C3)
 
 ### Added

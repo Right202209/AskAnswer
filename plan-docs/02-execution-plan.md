@@ -14,7 +14,7 @@
 - [x] B2 测试套件（107 用例 / 7 文件，无 API key 可跑）（d8cebca）
 - [x] B3 lint 基线 + 文档回写（9483ee6 / b1258b3）
 - [x] B4 CI（GitHub Actions，ruff + pytest，py3.10/3.12）（f1409b2）
-- [ ] C1 拆分 cli.py（runner/renderer/commands）
+- [x] C1 拆分 cli.py（runner/renderer/commands）（本次：`askanswer/cli/` 包，16 模块均 ≤300 行；`stream_query` 收敛到 `runner.stream_leg`）
 - [x] C2 通用澄清能力（a106a57）—— ⚠ 早于 C1 落地（偏离原定顺序）
 - [x] C3 HTTP/SSE server（b0c862d）—— ⚠ 早于 C1 落地：runner.py 已抽出，但 cli.py 尚未成包
 - [ ] C4 只读 Web UI（web/ 已有静态页，缺 JSON endpoint）
@@ -126,6 +126,7 @@
 
 目标结构：`askanswer/cli/` 包 —— `__init__.py`（main 入口，≤100 行）、`runner.py`（graph 事件流，纯逻辑无 UI）、`render.py`（rich 渲染）、`commands/`（slash 命令按域拆：threads/timetravel/mcp/audit/misc）。约束：纯移动+拆函数，不改行为；B2 测试全绿即验收；每个新文件 ≤300 行。提交：`refactor: split cli into runner/render/commands package`。
 - **注意（当前状态）**：C3 已提前抽出顶层 `askanswer/runner.py`（graph 事件流），CLI 与 HTTP server 都消费它；但 `cli.py` 仍是 2510 行单文件。C1 = 把 `cli.py` 拆成 `askanswer/cli/` 包并复用已有 `runner.py`（避免再造一份事件流），render/commands 从 `cli.py` 迁出。B2 的 107 个测试是这次纯移动重构的回归网。
+- **实际落地**：`askanswer/cli/` 包（16 模块，全部 ≤300 行；`__init__.py` 92 行含 `main` + 向后兼容再导出）。模块：`theme`/`text`/`render`/`progress`/`confirm`/`stream`/`repl`/`app` + `commands/`（`__init__` 路由 + `model`/`mcp`/`mcp_view`/`threads`/`timetravel`/`audit`/`transfer`/`_common`）。`stream_query` 收敛到 `runner.stream_leg`（删掉 CLI 自持的 `app.stream` 事件循环与 `_handle_message_chunk`/`_extract_interrupt_value`/`_pending_interrupt`——逻辑已在 runner 里），turn 级记账仍留在 CLI（不改审计粒度）。新增 `tests/test_cli_stream.py`（5 例）锁住 runner 事件契约 + stream_query 消费映射（此前 runner/stream 无测试覆盖）。验收：`pytest -q` = **112 passed**、`ruff check` 全绿、`askanswer --graph -` 与 `askanswer.cli:main` 均正常。
 
 ### C2 通用澄清能力
 
