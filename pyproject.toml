@@ -8,24 +8,38 @@ version = "0.1.0"
 description = "AskAnswer 命令行搜索助手"
 requires-python = ">=3.10"
 dependencies = [
+    # --- Orchestration / LLM ---
+    # Used across graph, nodes, tools, subgraphs (import: langchain, langchain_core, langgraph)
     "langchain>=1.0",
     "langchain-core>=0.3.0",
-    "langchain-community>=0.3.0",
-    "langchain-openai>=0.3.0",
+    "langchain-community>=0.3.0",  # sqlagent (SQLDatabase / SQLDatabaseToolkit)
+    "langchain-openai>=0.3.0",  # default openai provider via init_chat_model (load.py)
     "langgraph>=1.1.5",
-    "langgraph-checkpoint-sqlite>=2.0",
-    "mcp",
-    "tavily-python",
-    "python-dotenv",
-    "rich",
-    "markitdown",
-    "prompt_toolkit>=3.0",
+    "langgraph-checkpoint-sqlite>=2.0",  # persistence SqliteSaver
+    "pydantic>=2.7",  # structured outputs (intents/base, helix, decision, research, registry)
+
+    # --- Tools & protocols ---
+    "mcp",  # MCP client (mcp.py) + helix FastMCP server (helix_mcp.py)
+    "tavily-python",  # web search client (load.py → TavilyClient)
+    "markitdown",  # read_file document conversion (tools.py)
+
+    # --- CLI / runtime config ---
+    "python-dotenv",  # .env loading (load.py)
+    "rich",  # terminal UI (cli/render, theme, stream, commands/*)
+    "prompt_toolkit>=3.0",  # REPL input (ui_input.py)
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
+]
+# Soft imports in askanswer/telemetry/* (try/except ImportError → no-op).
+# Install when enabling LangSmith / OTEL exporters:
+#   pip install -e ".[telemetry]"
+telemetry = [
+    "langsmith",
+    "opentelemetry-api",
 ]
 
 [project.scripts]
@@ -53,4 +67,3 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["askanswer"]
-

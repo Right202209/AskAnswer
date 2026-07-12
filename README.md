@@ -1,26 +1,34 @@
 # AskAnswer
 
-基于 LangGraph 的命令行智能助手：按意图分流到「读本地文件 / 联网搜索 / SQL 查询 / 规格演化 / 直接回答」，由 LLM 调度工具并整合结果，支持自评改写与 Markdown 渲染。
+基于 LangGraph 的命令行智能助手：按意图分流到「读本地文件 / 联网搜索 / SQL 查询 / 调研简报 / 决策备忘 / 规格演化 / 直接回答」，由 LLM 调度工具并整合结果，支持 HITL 确认、会话持久化、时间旅行与 Markdown 渲染。
+
+当前状态（2026-07-12）：`master` 干净；`pytest` 全绿（112）；GitHub Actions 对 Python 3.10 / 3.12 跑 ruff + pytest。CLI 已拆成 `askanswer/cli/` 包，与 HTTP/SSE 服务共用 `runner` 事件流。
 
 ## 安装
 
 ```bash
-pip install -e .
+python -m venv .venv && source .venv/bin/activate
+pip install -e .            # Python >= 3.10
+pip install -e ".[dev]"     # + pytest / ruff
 ```
 
 ## 配置
 
-在项目根目录创建 `.env`：
+在项目根目录创建 `.env`（可参考 `.env.example`）：
 
 ```
 OPENAI_API_KEY=...
+OPENAI_BASE_URL=...           # 可选
 TAVILY_API_KEY=...
-OPENWEATHER_API_KEY=...   # 可选，启用天气工具
-WLANGGRAPH_POSTGRES_DSN=postgresql://user:password@localhost:5432/dbname  # 可选，SQL agent 默认数据库
-ASKANSWER_DB_DIALECT=  # 可选；留空时从数据库连接自动推断方言
+OPENWEATHER_API_KEY=...       # 可选，启用天气工具
+WLANGGRAPH_POSTGRES_DSN=postgresql://user:password@localhost:5432/dbname  # 可选，SQL agent 默认库
+ASKANSWER_DB_DIALECT=         # 可选；留空时从连接自动推断
+ASKANSWER_DB_PATH=            # 可选；默认 ~/.askanswer/state.db
+ASKANSWER_TENANT_ID=          # 可选；多租户隔离
+ASKANSWER_SERVER_TOKEN=       # 可选；HTTP 服务 Bearer 鉴权
 ```
 
-SQL agent 实际从 LangGraph runtime context 读取数据库配置：
+SQL agent 从 LangGraph runtime context 读库配置（不写进 `SearchState`）：
 
 ```python
 from askanswer.graph import create_search_assistant
@@ -33,111 +41,190 @@ app.invoke(
 )
 ```
 
-CLI 会把 `.env` 中的 `WLANGGRAPH_POSTGRES_DSN` / `ASKANSWER_DB_DIALECT` 注入 runtime context。
+CLI / HTTP 服务会把 `.env` 中的 `WLANGGRAPH_POSTGRES_DSN` / `ASKANSWER_DB_DIALECT` / `ASKANSWER_TENANT_ID` 注入 runtime context（`runner.runtime_context_from_env()`）。
 
-### Helix 规格演化子图
+### 其他常用环境变量
 
-`helix_spec_loop` 工具背后是一个独立子图：`interview → seed → execute → evaluate → (seed 重跑 | finalize)`。当用户给出模糊需求（`"用苏格拉底问我..." / "spec-first design..." / "需求澄清..."` 等）时，意图分类器命中 `helix`，LLM 转而调用该工具：
-
-- **interview**：按 scope/constraints/outputs/verification 四个歧义轨道生成关键问题并自答（标注 `assumption:`）
-- **seed**：晶化为 Seed 规格（`goal / constraints / acceptance_criteria / ontology / principles`）
-- **execute**：根据 Seed 产出方案文本（步骤、关键代码骨架或配置）
-- **evaluate**：覆盖率自查 + 0–1 语义对齐分 + gaps 列表
-- **演化**：rejected 时回到 seed 修补 gaps，最多 `MAX_GENERATIONS=3` 代
-
-子图返回 Markdown：`## Goal / ## Constraints / ## Acceptance criteria / ## Artifact / ## Evaluation / ## Lineage`。设计文档见 `docs/helix-subgraph-plan.md`。
+| 变量 | 说明 |
+| --- | --- |
+| `ASKANSWER_MCP_ALL_INTENTS` | `1` 时 MCP 工具对所有意图可见（默认仅 chat） |
+| `ASKANSWER_READ_FILE_MAX_BYTES` | `read_file` 上限（默认 10 MB） |
+| `ASKANSWER_WRITE_FILE_MAX_BYTES` | `write_file` 上限（默认 1 MB） |
+| `ASKANSWER_SHELL_OUTPUT_MAX_BYTES` | shell 每路输出上限（默认 64 KB） |
+| `LANGSMITH_API_KEY` / `ASKANSWER_OTEL_EXPORTER` | 可选可观测导出（关则零开销） |
 
 ## 使用
 
 ```bash
 askanswer "上海今天天气怎么样"   # 单次提问
-askanswer                         # 交互模式
+askanswer                         # 交互 REPL
 python -m askanswer               # 等价入口
-askanswer --graph                 # 输出 LangGraph Mermaid 图
-askanswer --graph docs/graph.mmd  # 写入 Mermaid 图文件
+askanswer --graph                 # 输出主图 Mermaid
+askanswer --graph docs/graph.mmd  # 写入文件（不创建 SQLite）
 ```
+
+### HTTP / SSE 服务
+
+与 CLI 共用同一图、checkpointer 与 `runner` 事件流（零额外依赖，stdlib only）：
+
+```bash
+python -m askanswer.server        # 默认 127.0.0.1:8765
+# 或 reinstall 后：askanswer-server
+```
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /health` | 健康检查 |
+| `POST /v1/query` | 提问，SSE 推送 `token` / `tool` / `node` / `interrupt` / `final` |
+| `POST /v1/resume` | HITL 续跑（decision 形态与 CLI 一致） |
+| `GET /v1/interrupt?thread_id=` | 查询挂起的 interrupt |
+
+安全基线：默认只绑 localhost；可选 Bearer token；Origin + JSON Content-Type 双闸；64KB body 上限；全局 2 路并发 + 同 thread 互斥。契约见 `docs/important-documentation-c3-http-sse-server.md`。
 
 ### 交互模式界面
 
-启动后进入类 Claude Code 的 REPL，含圆角欢迎框、箱式输入提示、进度标记 `⏺ Node(detail)`，回答以 Markdown 渲染（标题 / 列表 / 代码块都能在主流 shell 正常显示，重定向到文件时自动退化为纯文本）。
+启动后进入类 Claude Code 的 REPL：圆角欢迎框、箱式输入、进度标记 `⏺ Node(detail)`，回答以 Markdown 渲染（重定向到文件时退化为纯文本）。输入历史在 `~/.askanswer/history`（自动过滤 API key / DSN 等敏感模式）。
 
-内置斜线命令：
+#### 斜线命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `/help` | 显示帮助 |
-| `/clear` | 清屏并开启新会话（新 thread） |
-| `/status` | 查看当前会话信息（含已连接的 MCP 服务） |
-| `/mcp` | 管理 MCP 服务（见下文） |
+| `/help [cmd]` | 显示帮助 |
+| `/clear` | 清屏并开启新会话 |
+| `/status` | 当前会话（含 MCP / model） |
+| `/model [provider:name]` | 查看或热切换模型 |
+| `/mcp …` | 管理 MCP（见下） |
+| `/threads [关键词]` | 列出历史会话 |
+| `/resume <序号\|id>` | 恢复指定会话 |
+| `/title <名字>` | 给当前会话命名 |
+| `/delete <序号\|id>` | 删除会话 |
+| `/checkpoints` | 列出当前会话快照 |
+| `/undo [n] [--label NAME]` | 回退；可命名还原点 |
+| `/jump <index>` | 跳到指定快照 |
+| `/fork [index]` | 从快照分叉新会话 |
+| `/audit …` | 审计事件 |
+| `/usage …` | token / 工具用量与费用估算 |
+| `/export` / `/import` | 会话导出（md/json）/ 导入 |
 | `/exit` / `/quit` / `/q` | 退出（也可 Ctrl-D） |
 
-另有快捷前缀 `!<cmd>`：直接在交互模式中执行一条 shell 命令（如 `!ls -la`、`!git status | head`），跳过 LLM 流程。命中高风险模式（`rm`、`sudo`、`dd if=` 等）时会二次确认。
+快捷前缀 `!<cmd>`：在 REPL 中直接执行 shell（如 `!ls -la`）；命中高风险模式时二次确认。
 
-### MCP 支持
-
-通过 `/mcp <url>` 即可热接入一个 MCP 服务。URL 传输自动识别：路径以 `/sse` 结尾走 SSE，其余按 streamable-HTTP 处理；也支持从代码里直接 `add_stdio(...)` 启动子进程 MCP。
+#### MCP
 
 ```text
-/mcp https://example.com/mcp            # 连接（自动推导服务名）
+/mcp https://example.com/mcp            # 连接（自动推导服务名；路径以 /sse 结尾走 SSE）
 /mcp https://example.com/mcp my-server  # 指定服务名
-/mcp list                               # 列出已连接服务
-/mcp tools [server]                     # 列出工具（可按 server 过滤）
-/mcp remove <name>                      # 断开指定服务
+/mcp add_stdio <name> <cmd> [args…]     # 子进程 stdio MCP
+/mcp list [-v]                          # 列表（-v 含健康详情）
+/mcp health [name]                      # 健康探测并刷新工具
+/mcp tools [server]                     # 列出工具
+/mcp remove <name>                      # 断开
 ```
 
-多个 server 的工具在聚合时以 `<server>__<tool>` 形式暴露；`call_tool` 按前缀路由到对应 session。每个 server 的上下文管理器在同一 asyncio 任务内进入/退出，避免 anyio cancel-scope 跨任务的问题。
+连接会写入 `~/.askanswer/mcp.json`，下次启动自动重连。多 server 工具以 `<server>__<tool>` 暴露；`call_tool` 按前缀路由。每个 server 的上下文管理器在同一 asyncio 任务内进入/退出，避免 anyio cancel-scope 跨任务问题。
+
+### Helix 规格演化
+
+`helix_spec_loop`：`interview → seed → execute → evaluate → (seed 重跑 | finalize)`。模糊需求（「用苏格拉底问我…」「spec-first…」「需求澄清…」等）命中 `helix` 意图后调用：
+
+- **interview**：scope / constraints / outputs / verification 四轨关键问题并自答（标 `assumption:`）
+- **seed** → **execute** → **evaluate**（覆盖率 + 0–1 对齐分 + gaps）
+- rejected 时最多 `MAX_GENERATIONS=3` 代回到 seed 修补
+
+返回 Markdown：`## Goal / Constraints / Acceptance criteria / Artifact / Evaluation / Lineage`。也可单独当 MCP 服务：`python -m askanswer.helix_mcp`。设计见 `docs/helix-subgraph-plan.md`。
+
+### 澄清协议（C2）
+
+react 子图入口有 `clarify` 节点：意图 handler 可在首轮回答前 `interrupt` 一次（路径缺失、无 DSN、调研话题过短等）。CLI 用箭头菜单 + 可选自由文本；非 TTY 取默认「不改动」选项，行为非回归。
+
+### HITL 确认
+
+三类确认共用 `confirmations.py` 四步协议（plan → gate → interrupt → apply）：
+
+| 类 | 典型工具 | CLI 提示 |
+| --- | --- | --- |
+| `shell` | `gen_shell_commands_run` | 执行 / 取消 / 重生成 / 编辑 |
+| `fs_write` | `write_file` | diff 预览后写入 / 取消 |
+| `external_api_paid` | 付费外部 API | 参数 + 费用警告；审计会脱敏密钥与邮箱 |
 
 ## 结构
 
 ```
 askanswer/
-├── cli.py               # 命令行入口：欢迎框、斜线命令、流式进度、Markdown 渲染
-├── graph.py             # 父图编排：understand → answer(react) → sorcery
-├── react.py             # answer 节点对应的 react 子图（answer ⇄ tools / confirm_plan）
-├── _react_internals.py  # react 子图节点实现（含意图重判 _reclassify_intent）
+├── cli/                 # REPL 包：app / stream / repl / confirm / render / commands/*
+├── graph.py             # 父图：understand → answer(react) → sorcery
+├── react.py             # react 子图拓扑（clarify → answer ⇄ tools / confirm_plan）
+├── _react_internals.py  # answer / tools / confirm_plan 节点实现
+├── clarify.py           # 意图澄清 interrupt
+├── confirmations.py     # HITL 确认协议（shell / fs_write / external_api_paid）
 ├── nodes.py             # 父图节点：意图识别、自评回写
-├── state.py             # SearchState（含 intent / file_path / pending_confirmations）
-├── schema.py            # ContextSchema：runtime context（db_dsn、tenant 等）
-├── tools.py             # 内置工具（搜索、读文件、天气、计算、IP、shell …）
-├── registry.py          # ToolRegistry：按 bundle 暴露工具，含 MCP 包装
-├── mcp.py               # MCP 客户端管理器：URL (HTTP/SSE) + stdio，多服务聚合
-├── sqlagent/            # SQL agent 子图，作为 sql_query 工具暴露
-├── helix/               # 规格优先演化子图，作为 helix_spec_loop 工具暴露
-├── intents/             # 意图 handler（chat/search/file_read/sql/math/helix）
-├── load.py              # 模型、Tavily、API key 加载
-└── __main__.py          # python -m 入口
+├── state.py / schema.py # SearchState + ContextSchema
+├── tools.py / registry.py
+├── runner.py / wire.py / server.py   # UI-free 事件流 + HTTP/SSE
+├── persistence.py / timetravel.py / audit.py / pricing.py
+├── mcp.py / mcp_profile.py / helix_mcp.py
+├── telemetry/           # LangSmith + OTEL（env 门控）
+├── intents/             # chat / search / file_read / sql / math / helix / research / decision
+├── sqlagent/ / helix/ / research/ / decision/   # 子图 → 注册为工具
+├── load.py              # 模型代理（/model 热切换）、Tavily、.env
+└── ui_input.py / ui_select.py / ui_spinner.py
 ```
 
 ## 工作流
 
 ```
-START → understand → answer ⇄ tools / confirm_plan → sorcery → {answer 重跑 | END}
+START → understand → answer(react) → sorcery → {answer 重跑 | END}
+
+react 子图:
+  START → clarify → answer ⇄ tools
+                      └→ confirm_plan → tools
 ```
 
-- `understand`：本地分类器优先（关键词 / 正则）判断意图为 `file_read` / `sql` / `chat` / `search` / `math` / `helix`，仅在歧义时调用 LLM；提取文件路径或搜索关键词
-- `answer`：react 子图的入口。按当前 `intent` 选择系统提示词与可见工具集（`registry.list(bundle=intent)`）；每轮还会用 `_reclassify_intent` 复判最新一条用户消息，使会话中途的话题切换（chat → SQL 等）实时切换工具集
-- `tools`：执行模型发起的工具调用（`tavily_search` / `read_file` / `sql_query` / 各类内置工具 / MCP 工具 …），结果回写后重入 `answer`
-- `shell_plan`：`gen_shell_commands_run` 走人机确认分支，预生成命令并 `interrupt()` 等待用户批准
-- `confirm_plan`：需要 HITL 确认的工具调用（shell / fs_write / external_api_paid）预先按确认类规划动作并写入 `pending_confirmations`，由 `tools` 节点通过 `interrupt()` 暂停等待用户批准
-- `sorcery`：自评答案质量；仅 `search` 路径允许改写关键词重跑一次（注入 `HumanMessage` 让模型重新调用 `tavily_search`）
+- **understand**：本地分类器优先（关键词/正则，handler 按 priority），歧义时才调 LLM；提取路径或搜索词
+- **clarify**：仅首轮（`step == "understood"`）；handler 可选提问，默认无开销透传
+- **answer**：按 `intent` 选系统提示与工具集（`registry.list(tags=…)`）；每轮 `_reclassify_intent` 支持中途换话题
+- **tools / confirm_plan**：普通工具直接跑；需确认的先 `plan` 写入 `pending_confirmations`，再 `interrupt()` 等人批准
+- **sorcery**：委托 `handler.evaluate`；重试预算按意图（search=2，sql/file_read=1，chat/math/helix/research/decision=0）
 
-## 工具集
+## 意图与工具
 
-模型在 `_answer_node` 已 `bind_tools(...)`，按当前意图过滤的工具集来自 `ToolRegistry`；内置工具默认对所有意图可见，shell 工具不进入 SQL bundle。
+意图经 `IntentRegistry` 注册；工具经 `ToolRegistry` 按 tag 过滤。内置工具默认对多意图可见；shell 不进 SQL bundle。
 
 | 工具 | 说明 |
 | --- | --- |
 | `tavily_search` | Tavily 联网搜索 Top 5 + 综合答案 |
-| `read_file` | `markitdown` 解析任意文件（txt/md/json/csv/xlsx/pdf/docx/代码 …）后由 LLM 总结 |
-| `sql_query` | 自然语言转 SQL：调用 SQL agent 子图，从 runtime context 读取 DSN/方言/租户 |
-| `helix_spec_loop` | 规格优先演化：苏格拉底澄清 → 生成 Seed → 产出方案 → 自评迭代（最多 3 代） |
+| `read_file` | `markitdown` 解析任意文件后由 LLM 总结 |
+| `sql_query` | 自然语言 → SQL agent 子图（DSN/方言/租户来自 context） |
+| `research_brief_loop` | 调研简报：规划查询 → 搜索 → 综合 → 来源核验 |
+| `decision_memo_loop` | 决策备忘：复用 Helix interview + decide |
+| `helix_spec_loop` | 规格优先演化（最多 3 代） |
 | `check_weather` | OpenWeather 实时天气 |
 | `get_current_time` | 指定时区当前时间 |
-| `calculate` | 安全表达式计算（+ - * / // % ** 与括号） |
+| `calculate` | 安全表达式计算 |
 | `convert_currency` | 货币汇率换算 |
-| `lookup_ip` | IP 地理位置与运营商查询 |
+| `lookup_ip` | IP 地理与运营商 |
 | `pwd` | 当前工作目录 |
-| `gen_shell_commands_run` | 生成并执行单条 shell 命令；高风险模式直接拦截，其余命令在 `interrupt()` 处暂停等待用户确认/编辑 |
-| `write_file` | 写入/覆盖文件（敏感路径拦截 + 1 MB 上限 + diff 预览），经 `fs_write` 确认后落盘 |
+| `gen_shell_commands_run` | 生成并执行 shell；高风险拦截 + HITL |
+| `write_file` | 写文件（敏感路径拦截、大小上限、diff 预览）+ `fs_write` 确认 |
 
-通过 `/mcp` 接入的 MCP 工具会以 `<server>__<tool>` 形式自动加入注册表，对所有意图可见。
+MCP 工具以 `<server>__<tool>` 自动入表。
+
+## 持久化与可观测
+
+- **状态 DB**：默认 `~/.askanswer/state.db`（`SqliteSaver` + `thread_meta` + `audit_event`，schema 自迁移；支持 `tenant_id`）
+- **时间旅行**：`/checkpoints` `/undo` `/jump` `/fork`（有挂起确认时拒绝 rewind）
+- **审计 / 用量**：LLM token、工具调用写入 `audit_event`；`/usage` 可估算费用（`pricing.py`）
+- **Telemetry**：`telemetry/` 可选 LangSmith / OpenTelemetry，默认关闭
+
+## 开发与验证
+
+```bash
+pytest -q                       # 全量（无需 API key；conftest 隔离 env + 临时 DB）
+ruff check askanswer tests      # lint 基线 E/F/I
+python -m compileall askanswer
+python -m askanswer --graph -   # 图拓扑可编译
+```
+
+CI：`.github/workflows/ci.yml` 在 push/PR 到 `master` 时对 3.10 / 3.12 跑 ruff + pytest。
+
+更细的架构索引见 `CLAUDE.md` / `AGENTS.md` → `.claude/mem/*`；变更日志见 `CHANGELOG.md`；待办见 `TODO.md`。
