@@ -10,6 +10,7 @@ HITL 流程，而非走普通 ``ToolNode`` 直接执行。
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Literal, Optional
@@ -18,7 +19,6 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, create_model
 
 from .mcp import get_manager as _mcp_manager
-
 
 _LOG = logging.getLogger(__name__)
 
@@ -46,8 +46,7 @@ _SHELL_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, "shell"})
 # math/search 等更具体的流程被 prompt 注入诱导调用付费/写副作用 API。
 # 用户如确认要在所有 intent 下使用 MCP，可设环境变量
 # ASKANSWER_MCP_ALL_INTENTS=1 重新放开（兼容旧行为）。
-import os as _os
-if (_os.environ.get("ASKANSWER_MCP_ALL_INTENTS") or "").strip().lower() in {"1", "true", "yes"}:
+if (os.environ.get("ASKANSWER_MCP_ALL_INTENTS") or "").strip().lower() in {"1", "true", "yes"}:
     _MCP_TAGS = ALL_INTENT_TAGS | frozenset({"mcp", "external_api"})
 else:
     _MCP_TAGS = frozenset({TAG_CHAT, "mcp", "external_api"})

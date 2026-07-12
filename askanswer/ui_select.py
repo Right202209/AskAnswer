@@ -16,7 +16,6 @@ from __future__ import annotations
 import select as _select
 import sys
 
-
 # ── ANSI codes（重复一份避免与 cli.C 形成相互导入） ─────────────────
 _ORANGE = "\033[38;5;214m"
 _DIM = "\033[2m"

@@ -16,7 +16,6 @@ import os
 import tempfile
 from pathlib import Path
 
-
 # profile 文件名；与 state.db 放在同一 base 目录下（见 ``default_profile_path``）。
 _PROFILE_FILENAME = "mcp.json"
 

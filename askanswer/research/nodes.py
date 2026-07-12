@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from ..load import model
 
-
 # 单次 research 调用允许规划/执行的最大检索次数，避免把 token 和时延拉爆。
 MAX_QUERIES = 5
 # 每条 tavily 结果里最多抽取的来源链接数

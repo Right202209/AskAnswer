@@ -9,7 +9,6 @@ from askanswer.registry import (
     get_registry,
 )
 
-
 # ── seed 内容 ────────────────────────────────────────────────────────────
 
 def test_registry_seeds_subgraph_tools():

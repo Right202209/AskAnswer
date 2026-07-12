@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
-
 from langgraph.graph import END, START, StateGraph
 
 from ..schema import ContextSchema, normalize_context
@@ -18,7 +17,6 @@ from .nodes import (
     seed_node,
 )
 from .state import HelixState
-
 
 # 递归上限：3 代 × 4 节点 + 收尾 + 余量，给 LangGraph 兜底。
 RECURSION_LIMIT = 24

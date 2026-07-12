@@ -6,7 +6,6 @@ import pytest
 
 from askanswer import confirmations as C
 
-
 # ── handler 分发 ─────────────────────────────────────────────────────────
 
 def test_supported_classes():

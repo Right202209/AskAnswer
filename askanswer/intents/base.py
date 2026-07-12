@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..state import SearchState
 
-
 Decision = Literal["pass", "retry"]
 
 

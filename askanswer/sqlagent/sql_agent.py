@@ -18,7 +18,6 @@ from .sql_node import (
     run_query_node,
 )
 
-
 # 单次 sql_query 调用允许执行 SQL 的最大次数（避免反复重写 SQL 把成本拉爆）
 MAX_SQL_QUERY_CALLS = 2
 # LangGraph 的递归层数上限，作为最后一道保险

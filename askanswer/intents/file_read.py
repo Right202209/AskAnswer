@@ -14,7 +14,6 @@ from .base import (
     pass_result,
 )
 
-
 FILE_READ_KEYWORDS = (
     "读",
     "读取",

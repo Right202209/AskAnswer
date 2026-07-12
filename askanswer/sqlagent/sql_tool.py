@@ -7,12 +7,11 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage
-from langchain_core.tools import tool
-
 # ``ToolRuntime`` 来自 langchain.tools（langchain >= 0.3）。
 # 它是 @tool 装饰器识别的“魔法参数名”，因此 LLM 看不到 runtime 这个参数 schema。
 from langchain.tools import ToolRuntime
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
 
 from ..schema import ContextSchema, normalize_context
 from .sql_agent import extract_sql_answer, run_sql_agent

@@ -1,6 +1,7 @@
 # LangGraph 父图共享的状态定义。
 # 所有节点的入参/返回值都基于 SearchState；新增持久化字段时记得在这里同步。
-from typing import TypedDict, Annotated
+from typing import Annotated, TypedDict
+
 from langgraph.graph.message import add_messages
 
 

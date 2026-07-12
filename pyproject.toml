@@ -39,3 +39,18 @@ include = ["askanswer*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# 保守起步的可全绿规则集：pyflakes(F)、pycodestyle 错误(E)、isort(I)。
+# 后续可逐步加 B/UP/SIM 等；加规则前先跑 `ruff check askanswer --statistics`。
+select = ["E", "F", "I"]
+# E501(行宽)交给 formatter 处理，不在 lint 报错；存量长行不阻塞基线。
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["askanswer"]
+

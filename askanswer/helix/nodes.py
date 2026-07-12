@@ -12,7 +12,6 @@ from ..load import model
 from ..ui_select import CANCELLED, is_interactive, select_option
 from .state import HelixState
 
-
 # ── 单次工具调用允许的最大演化代数。SQL agent 的 MAX_SQL_QUERY_CALLS 同款思路：
 #    防止评估反复打回导致 token 和时延双双爆掉。
 MAX_GENERATIONS = 3

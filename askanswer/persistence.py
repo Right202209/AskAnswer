@@ -26,7 +26,6 @@ from typing import Optional
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-
 # 当前自管 schema 版本号；新增列 / 表时把版本号 +1，并在 ``_migrate`` 里追加迁移分支。
 _SCHEMA_VERSION = 4
 

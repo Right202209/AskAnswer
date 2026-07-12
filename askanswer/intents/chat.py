@@ -5,7 +5,6 @@ from __future__ import annotations
 from ..state import SearchState
 from .base import EvaluationResult, IntentClassification, pass_result
 
-
 CHAT_STARTERS = (
     "你好",
     "您好",

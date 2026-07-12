@@ -7,7 +7,6 @@ import re
 from ..state import SearchState
 from .base import EvaluationResult, IntentClassification, pass_result
 
-
 MATH_RE = re.compile(r"(?<!\w)(?:\d+(?:\.\d+)?\s*[-+*/%()]+[\d\s.+\-*/%()]+)")
 # 仅在「算」紧邻数字、等号或括号时才视为计算请求，避免命中 打算/估算/算了 等无关词。
 COMPUTE_VERB_RE = re.compile(r"算[\s]*[\d=（(]")

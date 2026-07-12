@@ -21,7 +21,6 @@ from mcp.server.fastmcp import FastMCP
 # 只依赖 Helix 子图入口；刻意不 import askanswer.graph / persistence。
 from .helix.agent import extract_helix_answer, run_helix_agent
 
-
 # server 名尽量可读，便于外部 client 在工具前缀里识别来源。
 mcp_server = FastMCP("askanswer-helix")
 

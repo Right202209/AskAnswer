@@ -9,7 +9,6 @@ from __future__ import annotations
 from ..state import SearchState
 from .base import EvaluationResult, IntentClassification, pass_result
 
-
 DECISION_KEYWORDS_LOWER = (
     "decision memo",
     "trade-off",

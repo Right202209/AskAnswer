@@ -26,7 +26,6 @@ from typing import Any, Iterator
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-
 # 已激活的 exporter 列表；空列表 = 未启用（emit/span 走零开销分支）。
 _exporters: list = []
 _initialized = False

@@ -7,7 +7,6 @@ import pytest
 from askanswer.intents import get_intent_registry
 from askanswer.intents.base import IntentClassification
 
-
 EXPECTED_HANDLERS = {
     "file_read", "sql", "helix", "decision", "math", "research", "search", "chat",
 }

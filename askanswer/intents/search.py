@@ -8,7 +8,6 @@ from ..load import model
 from ..state import SearchState
 from .base import EvaluationResult, IntentClassification, latest_tool_message, pass_result
 
-
 SEARCH_KEYWORDS = (
     "联网",
     "搜索",

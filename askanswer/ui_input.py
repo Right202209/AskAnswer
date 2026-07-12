@@ -29,7 +29,6 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
-
 # 斜杠命令清单 + 一句话说明；同时供 ``handle_command`` 之外的 ``/help <cmd>`` 使用。
 # 顺序也是 ``/help`` 列表展示顺序。
 SLASH_COMMANDS: list[tuple[str, str, str]] = [

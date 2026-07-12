@@ -17,7 +17,6 @@ from langchain_core.callbacks import BaseCallbackHandler
 
 from .persistence import get_persistence
 
-
 _THREAD_ID: ContextVar[str | None] = ContextVar("askanswer_audit_thread_id", default=None)
 _PENDING: ContextVar[list[dict] | None] = ContextVar("askanswer_audit_pending", default=None)
 _TENANT_ID: ContextVar[str | None] = ContextVar("askanswer_audit_tenant_id", default=None)

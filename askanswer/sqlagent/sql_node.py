@@ -13,7 +13,6 @@ from ..load import model
 from ..schema import ContextSchema, normalize_context
 from .sql_interact import get_sql_dialect, get_sql_tool
 
-
 # 字符截断阈值：避免把超大表的 schema 或查询结果整段塞进 prompt
 MAX_TABLE_LIST_CHARS = 4000
 MAX_SCHEMA_CHARS = 12000

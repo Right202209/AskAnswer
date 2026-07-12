@@ -15,7 +15,6 @@ from .base import (
     pass_result,
 )
 
-
 SQL_KEYWORDS = (
     "sql",
     "数据库",

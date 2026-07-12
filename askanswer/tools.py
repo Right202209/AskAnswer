@@ -1,9 +1,13 @@
 # 内置工具集合：天气、时间、计算、汇率、IP、读文件、联网搜索、shell 执行等。
 # 这里定义的每个 @tool 函数都会通过 registry.py 注册到统一工具表，
 # 然后由 react 子图按 intent 暴露给 LLM。
-import ast, csv, difflib, json, operator, re
+import ast
+import difflib
+import json
+import operator
 import os
 import platform
+import re
 import shlex
 import subprocess
 from datetime import datetime
@@ -11,10 +15,11 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from markitdown import MarkItDown
-from langchain_core.tools import tool
 
-from .load import openweather_api_key, model, tavily_client
+from langchain_core.tools import tool
+from markitdown import MarkItDown
+
+from .load import model, openweather_api_key, tavily_client
 
 
 @tool

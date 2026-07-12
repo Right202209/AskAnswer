@@ -12,7 +12,6 @@ from langchain_core.tools import BaseTool, StructuredTool
 from ..load import model
 from ..schema import ContextSchema, normalize_context
 
-
 # 兼容旧环境变量名：当 ContextSchema.db_dsn 没传时回退到该环境变量
 _DSN_ENV_VAR = "WLANGGRAPH_POSTGRES_DSN"
 

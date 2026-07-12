@@ -6,7 +6,6 @@ the CLI can still show token totals without pretending to know a price.
 
 from __future__ import annotations
 
-
 _USD_PER_1K: dict[str, tuple[float, float]] = {
     "openai:gpt-4o": (0.0025, 0.0100),
     "openai:gpt-4o-mini": (0.00015, 0.00060),

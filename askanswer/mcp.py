@@ -18,7 +18,6 @@ from urllib.parse import urlparse
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-
 # 安全的服务名字符集合 —— 用于把 URL 派生出可读、可作为前缀的服务名
 _NAME_SAFE = re.compile(r"[^a-zA-Z0-9_-]+")
 

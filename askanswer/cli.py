@@ -15,7 +15,6 @@ import json
 import os
 import re
 import shlex
-import sys
 import time
 import unicodedata
 import uuid
@@ -31,7 +30,7 @@ from langchain_core.messages import (
 )
 from langgraph.types import Command
 from rich import box
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -41,12 +40,13 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-from .graph import create_search_assistant, draw_search_assistant_mermaid
+from . import mcp_profile
 from .audit import begin_run, end_run, flush_pending, log_event
+from .graph import create_search_assistant, draw_search_assistant_mermaid
 from .intents import get_intent_registry
 from .load import current_model_label, model, set_model
-from .mcp import get_manager as _mcp_manager, shutdown_manager as _mcp_shutdown
-from . import mcp_profile
+from .mcp import get_manager as _mcp_manager
+from .mcp import shutdown_manager as _mcp_shutdown
 from .persistence import (
     AuditEvent,
     ThreadMeta,
@@ -68,7 +68,6 @@ from .tools import check_dangerous, execute_shell_command, gen_shell_command_spe
 from .ui_input import SLASH_COMMANDS, cmd_meta, make_session, read_line
 from .ui_select import is_interactive, select_option
 from .ui_spinner import Spinner
-
 
 # rich 控制台：所有 Panel / Table / Markdown 都走它。``Theme`` 是 cli 视觉的
 # 单一真源 —— 调色板调整只动这里一处。``class C`` 是给 print f-string 路径

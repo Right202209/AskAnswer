@@ -17,7 +17,6 @@ from .base import (
     pass_result,
 )
 
-
 # user_query 短于此长度时，判定研究范围偏宽、值得先澄清聚焦角度（启发式，可调）。
 RESEARCH_SCOPE_MIN_CHARS = 24
 

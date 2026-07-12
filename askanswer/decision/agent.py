@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field
@@ -16,7 +14,6 @@ from pydantic import BaseModel, Field
 from ..helix.nodes import interview_node
 from ..load import model
 from ..schema import ContextSchema, normalize_context
-
 
 # 决策备忘里方案数量的软上限，避免 LLM 铺开太多选项稀释重点。
 MAX_OPTIONS = 4
