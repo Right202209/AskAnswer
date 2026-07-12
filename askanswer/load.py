@@ -6,7 +6,6 @@ import os
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
-from langchain_openai import OpenAI
 from tavily import TavilyClient
 
 from .audit import with_llm_audit_callback
@@ -57,27 +56,36 @@ class _ModelProxy:
         object.__setattr__(self, "_spec", spec)
         object.__setattr__(self, "_provider", provider)
 
+    def _ensure_inner(self):
+        # 惰性构造：首次真正调用模型时才 init_chat_model。
+        # 约束：`import askanswer.*` 不得要求 OPENAI_API_KEY（spec §5 冒烟矩阵第 1 项）。
+        if self._inner is None:
+            object.__setattr__(
+                self, "_inner", _build_model(self._spec, provider=self._provider)
+            )
+        return self._inner
+
     def __getattr__(self, name):
         # 任何未知属性的访问都转发到真实 backend（如 invoke / bind_tools / stream 等）
-        return getattr(self._inner, name)
+        return getattr(self._ensure_inner(), name)
 
     def invoke(self, *args, **kwargs):
         args, kwargs = _inject_audit_callback(args, kwargs)
-        return self._inner.invoke(*args, **kwargs)
+        return self._ensure_inner().invoke(*args, **kwargs)
 
     def stream(self, *args, **kwargs):
         args, kwargs = _inject_audit_callback(args, kwargs)
-        return self._inner.stream(*args, **kwargs)
+        return self._ensure_inner().stream(*args, **kwargs)
 
     def bind_tools(self, *args, **kwargs):
-        return _AuditedRunnable(self._inner.bind_tools(*args, **kwargs))
+        return _AuditedRunnable(self._ensure_inner().bind_tools(*args, **kwargs))
 
     def with_structured_output(self, *args, **kwargs):
-        return _AuditedRunnable(self._inner.with_structured_output(*args, **kwargs))
+        return _AuditedRunnable(self._ensure_inner().with_structured_output(*args, **kwargs))
 
     def __setattr__(self, name, value):
         # 写属性也转发给 backend，保持代理透明
-        setattr(self._inner, name, value)
+        setattr(self._ensure_inner(), name, value)
 
     def __repr__(self):
         # 调试时清楚地看到当前实际使用的 provider:spec
@@ -143,11 +151,9 @@ _INITIAL_SPEC = "gpt-5.4"
 _INITIAL_PROVIDER = "openai"
 
 # 模块级单例：所有节点 / 工具都直接 `from .load import model` 使用它。
-model = _ModelProxy(
-    _build_model(_INITIAL_SPEC, provider=_INITIAL_PROVIDER),
-    _INITIAL_SPEC,
-    _INITIAL_PROVIDER,
-)
+# inner=None → 惰性构造：首次调用（invoke/stream/bind_tools…）时才建模型，
+# 使得纯导入（`--graph`、测试、helix_mcp）无需 OPENAI_API_KEY。
+model = _ModelProxy(None, _INITIAL_SPEC, _INITIAL_PROVIDER)
 
 
 def set_model(spec: str, **kwargs) -> str:
