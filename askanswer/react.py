@@ -9,6 +9,7 @@ from ._react_internals import (
     _route_from_answer,
     _tools_node,
 )
+from .clarify import clarify_node
 from .schema import ContextSchema
 from .state import SearchState
 
@@ -21,6 +22,9 @@ def build_react_subgraph():
     这样 HITL 流程里 ``interrupt()`` 抛出的中断才能透传到父级 stream。
     """
     builder = StateGraph(SearchState, context_schema=ContextSchema)
+    # clarify 节点：answer 之前的通用澄清入口（缺路径/缺 DSN/范围不清时 interrupt 询问），
+    # 仅首轮触发、不改父图拓扑；无需澄清时是零成本直通。
+    builder.add_node("clarify", clarify_node)
     # answer 节点：调用 LLM、根据 intent 绑定不同工具集、产出 AIMessage 或 tool_calls
     builder.add_node("answer", _answer_node)
     # confirm_plan 节点：在执行需要确认的工具前按确认类规划动作并写入 pending_confirmations
@@ -28,7 +32,9 @@ def build_react_subgraph():
     # tools 节点：分发普通工具调用与需要确认的工具调用
     builder.add_node("tools", _tools_node)
 
-    builder.add_edge(START, "answer")
+    # 入口先过 clarify，再进 answer
+    builder.add_edge(START, "clarify")
+    builder.add_edge("clarify", "answer")
     # answer 之后的条件分支：无 tool 调用直接结束；普通工具走 tools；需要确认的走 confirm_plan
     builder.add_conditional_edges(
         "answer",

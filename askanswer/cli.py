@@ -65,7 +65,7 @@ from .timetravel import (
 )
 from .tools import check_dangerous, execute_shell_command, gen_shell_command_spec
 from .ui_input import SLASH_COMMANDS, cmd_meta, make_session, read_line
-from .ui_select import CANCELLED, select_option
+from .ui_select import is_interactive, select_option
 from .ui_spinner import Spinner
 
 
@@ -385,6 +385,7 @@ def _marker(title: str, detail: str = "", elapsed: float | None = None) -> str:
 # 节点 → spinner 显示文案的映射；未列出的节点用兜底文案。
 _PHASE_TEXT = {
     "understand":    "理解意图…",
+    "clarify":       "澄清需求…",
     "answer":        "思考中…",
     "tools":         "执行工具…",
     "confirm_plan":  "规划待确认操作…",
@@ -679,6 +680,11 @@ def _on_node_update(
         spinner.transition(_phase_text("sorcery"))
         return final_answer
 
+    # clarify 节点绝大多数轮次无澄清（返回空 update）：完全隐身，不打标记也不切
+    # spinner 文案，避免每轮都闪一行「澄清需求…」。
+    if node == "clarify" and not update:
+        return final_answer
+
     # 其它节点：一律先暂停 spinner 写一行 ⏺ 标记，再切到下一阶段文案。
     new_final = _render_node_update_safely(
         node, update, final_answer, elapsed, spinner,
@@ -747,6 +753,9 @@ def _render_node_update(
             print(_marker("Sorcery", "通过", elapsed))
     elif node == "tools":
         print(_marker("Tools", "执行工具调用", elapsed))
+    elif node == "clarify":
+        # 只有真的澄清出结果（update 非空）才打标记；空 update 在 _on_node_update 已拦截。
+        print(_marker("Clarify", _clarify_detail(update), elapsed))
     elif node in ("confirm_plan", "shell_plan"):
         plans = update.get("pending_confirmations") or update.get("pending_shell") or {}
         detail = f"规划 {len(plans)} 项确认" if plans else "规划完成"
@@ -759,6 +768,17 @@ def _render_node_update(
 
 def _intent_cli_label(update: dict) -> str:
     return get_intent_registry().get(update.get("intent")).cli_label(update)
+
+
+def _clarify_detail(update: dict) -> str:
+    """把 clarify 节点的 update（并回的字段）翻成一行人类可读的进度说明。"""
+    if update.get("file_path"):
+        return f"文件：{_truncate(update['file_path'], 40)}"
+    if update.get("intent"):
+        return "改用通用知识作答"
+    if update.get("user_query"):
+        return "已细化研究范围"
+    return "已澄清"
 
 
 def _extract_interrupt_value(update):
@@ -789,11 +809,38 @@ def _prompt_confirmation(payload) -> dict:
     """按确认类型分发到对应的 CLI 确认菜单。"""
     data = payload if isinstance(payload, dict) else {}
     confirm_type = data.get("type") or ""
+    if confirm_type == "clarify":
+        return _prompt_clarification(data)
     if confirm_type == "confirm_fs_write":
         return _prompt_fs_write_confirmation(data)
     if confirm_type == "confirm_external_api_paid":
         return _prompt_paid_confirmation(data)
     return _prompt_shell_confirmation(payload)
+
+
+def _prompt_clarification(data: dict) -> dict:
+    """通用澄清菜单：TTY 弹 ui_select 收集选择；非 TTY 直接取默认项（不阻塞非交互流程）。
+
+    返回 ``{"index", "text"}`` 作为 resume 值：``index`` 是选中项（手动输入项排在最后，
+    其 index == 选项数），``text`` 仅命中手动输入项时为用户键入内容。
+    """
+    labels = [str(x) for x in (data.get("labels") or [])]
+    default_index = int(data.get("default_index") or 0)
+    has_free_text = bool(data.get("free_text"))
+    # 非交互或无任何可选项：按约定回默认项，行为与未澄清时一致。
+    if not is_interactive() or (not labels and not has_free_text):
+        return {"index": default_index, "text": None}
+
+    print()
+    print(f"  {C.ORANGE}⏸{C.RESET}  {C.BOLD}{data.get('prompt') or '需要澄清'}{C.RESET}")
+    idx, text = select_option(
+        labels,
+        prompt="选择（↑/↓ 导航 · Enter 确认）：",
+        default=default_index,
+        free_input_label=data.get("free_text_label") if has_free_text else None,
+        free_input_prompt=data.get("free_text_prompt") or "请输入：",
+    )
+    return {"index": idx, "text": text}
 
 
 def _prompt_fs_write_confirmation(data: dict) -> dict:

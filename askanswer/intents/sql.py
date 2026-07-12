@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import re
 
+from ..schema import ContextSchema
 from ..state import SearchState
-from .base import EvaluationResult, IntentClassification, latest_tool_message, pass_result
+from .base import (
+    ClarificationChoice,
+    ClarificationRequest,
+    EvaluationResult,
+    IntentClassification,
+    latest_tool_message,
+    pass_result,
+)
 
 
 SQL_KEYWORDS = (
@@ -39,6 +47,26 @@ class SqlHandler:
 
     def prompt_hint(self, state: SearchState) -> str:
         return "（这是数据库/SQL 类问题；如需查询数据，调用 sql_query 工具。）"
+
+    def clarify(
+        self, state: SearchState, context: ContextSchema
+    ) -> ClarificationRequest | None:
+        """识别为 SQL 但运行时没有数据库连接（DSN）时，让用户决定如何继续。"""
+        if context.db_dsn:
+            return None  # 已配置连接，直接查库
+        # 默认项「仍按数据库处理」= 保持现状（sql_query 会因无连接自行报错并回填），
+        # 非 TTY 不回归；TTY 下用户可改选「通用知识作答」把 intent 切成 chat。
+        return ClarificationRequest(
+            prompt="没检测到数据库连接（未设置 WLANGGRAPH_POSTGRES_DSN）。怎么继续？",
+            choices=(
+                ClarificationChoice(label="仍按数据库问题处理（无连接可能失败）"),
+                ClarificationChoice(
+                    label="改用通用知识作答（不连数据库）",
+                    updates={"intent": "chat"},
+                ),
+            ),
+            default_index=0,
+        )
 
     def evaluate(self, state: SearchState) -> EvaluationResult:
         tool_message = latest_tool_message(state, "sql_query")

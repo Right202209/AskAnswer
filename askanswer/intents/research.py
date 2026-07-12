@@ -7,8 +7,19 @@
 
 from __future__ import annotations
 
+from ..schema import ContextSchema
 from ..state import SearchState
-from .base import EvaluationResult, IntentClassification, pass_result
+from .base import (
+    ClarificationChoice,
+    ClarificationRequest,
+    EvaluationResult,
+    IntentClassification,
+    pass_result,
+)
+
+
+# user_query 短于此长度时，判定研究范围偏宽、值得先澄清聚焦角度（启发式，可调）。
+RESEARCH_SCOPE_MIN_CHARS = 24
 
 
 # 研究/调研类关键词（中英混合）。命中即优先走 research 子图而非单次 search。
@@ -64,6 +75,35 @@ class ResearchHandler:
             "（这是研究简报请求：不要只搜一次，先调用 research_brief_loop 工具，"
             "传入用户原始主题作为 topic，等子图返回带引用的 Markdown 简报后再回答；"
             "回答末尾保留 References 引用块。）"
+        )
+
+    def clarify(
+        self, state: SearchState, context: ContextSchema
+    ) -> ClarificationRequest | None:
+        """主题过宽时，先让用户挑一个聚焦角度，避免简报泛泛而谈。"""
+        query = str(state.get("user_query") or "").strip()
+        if not query or len(query) >= RESEARCH_SCOPE_MIN_CHARS:
+            return None  # 空主题无从聚焦；足够具体则直接开跑
+        # 默认项「全面概览」不改写 user_query = 保持现状，非 TTY 不回归；
+        # 其余角度把聚焦提示拼进 user_query（answer 节点会带进 system prompt）。
+        return ClarificationRequest(
+            prompt=f"研究主题「{query}」范围偏宽，想聚焦到哪个角度？",
+            choices=(
+                ClarificationChoice(label="全面概览（不额外限定）"),
+                ClarificationChoice(
+                    label="最新进展（近一年动态）",
+                    updates={"user_query": f"{query} —— 侧重最近一年的最新进展与变化"},
+                ),
+                ClarificationChoice(
+                    label="原理与机制（深入分析）",
+                    updates={"user_query": f"{query} —— 侧重技术原理、机制与深入分析"},
+                ),
+                ClarificationChoice(
+                    label="对比与选型（优劣、替代方案）",
+                    updates={"user_query": f"{query} —— 侧重横向对比、优劣与可选替代方案"},
+                ),
+            ),
+            default_index=0,
         )
 
     def evaluate(self, state: SearchState) -> EvaluationResult:

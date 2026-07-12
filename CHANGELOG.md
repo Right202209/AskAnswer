@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-07-12 · generic clarification protocol (C2)
+
+### Added
+- Optional `clarify(state, context)` capability on intent handlers: `ClarificationChoice` / `ClarificationRequest` dataclasses plus the exception-safe `get_clarification` dispatcher in `intents/base.py`. Implemented today by `file_read` (no path → skip / enter one manually), `sql` (no `db_dsn` → proceed as DB question / switch intent to chat), `research` (topic shorter than `RESEARCH_SCOPE_MIN_CHARS=24` → pick a focus angle).
+- `clarify_node` (`askanswer/clarify.py`) at the react-subgraph entry (`START → clarify → answer`): runs only on the first answer pass (`step == "understood"`, so sorcery retries and the answer⇄tools loop never re-ask), interrupts with `{"type": "clarify", ...}`, resumes via `Command(resume={"index", "text"})` and merges the chosen updates into `SearchState`. Parent graph topology unchanged; zero-cost pass-through when no handler asks.
+- CLI: `_prompt_clarification` arrow-key menu (with optional free-text entry), `⏺ Clarify` progress marker, spinner phase text. Non-TTY takes the default choice, and every default equals "no change" — non-interactive behavior is non-regressive by construction.
+
+### Verification
+- **Not yet run** (code-only session). The mandatory matrix lives in `docs/important-documentation-verification-matrix.md`; groups G0+G2+G3+G4 gate C2 acceptance, and the C2 box in `plan-docs/02-execution-plan.md` stays unchecked until they pass.
+
 ## 2026-07-11 · audit redaction for paid-API confirmations
 
 ### Security
