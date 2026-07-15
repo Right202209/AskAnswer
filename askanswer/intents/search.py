@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import SystemMessage
 
-from ..load import model
+from ..routing import ROLE_EVALUATE, model_for
 from ..state import SearchState
 from .base import EvaluationResult, IntentClassification, latest_tool_message, pass_result
 
@@ -85,7 +85,7 @@ class SearchHandler:
     评分：re_search
     新搜索词：[更精准的新搜索词]
     """
-        response = model.invoke([SystemMessage(content=prompt)])
+        response = model_for(ROLE_EVALUATE).invoke([SystemMessage(content=prompt)])
         response_text = str(response.content or "")
         if "评分：re_search" not in response_text or "新搜索词：" not in response_text:
             return pass_result("evaluation passed")

@@ -34,6 +34,15 @@ def _build_model(spec: str, *, provider: str | None = None, **kwargs):
     return init_chat_model(spec, model_provider=provider, **params)
 
 
+def build_backend(spec: str, **kwargs):
+    """按 "provider:name" 标签构造 backend；供 routing 层解析回退候选复用。
+
+    与 ``_build_model`` 的差别仅是入参形态：这里统一接收带 provider 前缀的标签，
+    routing 层不必关心 provider 拆分细节。
+    """
+    return _build_model(spec, **kwargs)
+
+
 class _ModelProxy:
     """转发所有属性访问到内部可替换的 chat 模型。
 
@@ -70,11 +79,11 @@ class _ModelProxy:
         return getattr(self._ensure_inner(), name)
 
     def invoke(self, *args, **kwargs):
-        args, kwargs = _inject_audit_callback(args, kwargs)
+        args, kwargs = inject_llm_callbacks(args, kwargs)
         return self._ensure_inner().invoke(*args, **kwargs)
 
     def stream(self, *args, **kwargs):
-        args, kwargs = _inject_audit_callback(args, kwargs)
+        args, kwargs = inject_llm_callbacks(args, kwargs)
         return self._ensure_inner().stream(*args, **kwargs)
 
     def bind_tools(self, *args, **kwargs):
@@ -101,11 +110,11 @@ class _AuditedRunnable:
         self._inner = inner
 
     def invoke(self, *args, **kwargs):
-        args, kwargs = _inject_audit_callback(args, kwargs)
+        args, kwargs = inject_llm_callbacks(args, kwargs)
         return self._inner.invoke(*args, **kwargs)
 
     def stream(self, *args, **kwargs):
-        args, kwargs = _inject_audit_callback(args, kwargs)
+        args, kwargs = inject_llm_callbacks(args, kwargs)
         return self._inner.stream(*args, **kwargs)
 
     def bind_tools(self, *args, **kwargs):
@@ -118,14 +127,23 @@ class _AuditedRunnable:
         return getattr(self._inner, name)
 
 
-def _inject_audit_callback(args: tuple, kwargs: dict) -> tuple[tuple, dict]:
-    """Append the audit (and, if enabled, telemetry) callback to a RunnableConfig."""
-    label = current_model_label()
+def inject_llm_callbacks(
+    args: tuple,
+    kwargs: dict,
+    *,
+    label: str | None = None,
+) -> tuple[tuple, dict]:
+    """Append the audit (and, if enabled, telemetry) callback to a RunnableConfig.
+
+    ``label=None`` 归因到当前全局模型；``routing.RoutedModel`` 传显式 label，
+    确保回退到另一个模型后 token 用量仍归因到真正执行调用的那一个。
+    """
+    resolved = label or current_model_label()
     if len(args) >= 2:
-        config = _augment_config(args[1], label)
+        config = _augment_config(args[1], resolved)
         return (args[0], config, *args[2:]), kwargs
     kwargs = dict(kwargs)
-    kwargs["config"] = _augment_config(kwargs.get("config"), label)
+    kwargs["config"] = _augment_config(kwargs.get("config"), resolved)
     return args, kwargs
 
 
@@ -176,6 +194,17 @@ def set_model(spec: str, **kwargs) -> str:
 def current_model_label() -> str:
     """返回当前活跃模型的可读标签（用于状态展示等场景）。"""
     return f"{model._provider}:{model._spec}"
+
+
+def raw_backend():
+    """返回全局代理**当前**的真实 backend（不带审计包裹）。
+
+    routing 层用它作为「跟随全局 `/model`」角色的候选：拿到的是热替换后的
+    最新 backend，回退编排会自己补上审计 callback，避免双重注入。
+
+    经 ``_ensure_inner``：惰性初始化未触发时也会构造 backend，避免返回 None。
+    """
+    return model._ensure_inner()
 
 
 # Tavily 联网搜索客户端：tavily_search 工具会调用它

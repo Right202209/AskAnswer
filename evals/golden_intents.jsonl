@@ -1,0 +1,32 @@
+{"id": "file-01", "query": "帮我读取 ./data/report.md 总结要点", "expected": "file_read"}
+{"id": "file-02", "query": "分析一下 /tmp/sales.csv 里的数据分布", "expected": "file_read"}
+{"id": "file-03", "query": "please analyze ./logs/error.log and find the root cause", "expected": "file_read"}
+{"id": "sql-01", "query": "查一下数据库里 users 表有多少行", "expected": "sql"}
+{"id": "sql-02", "query": "帮我写一条 SQL 统计每月订单量", "expected": "sql"}
+{"id": "sql-03", "query": "show me the table structure in mysql", "expected": "sql"}
+{"id": "sql-04", "query": "帮我选型：postgres 还是 mysql 更适合我们", "expected": "sql", "note": "关键词碰撞：sql(20) 优先于 decision(21)，显式数据库名覆盖选型语义 —— 期望值记录现状约定"}
+{"id": "decision-01", "query": "帮我选：Vue 还是 React，给出利弊", "expected": "decision"}
+{"id": "decision-02", "query": "消息队列选型：Kafka 和 Pulsar 怎么权衡", "expected": "decision"}
+{"id": "decision-03", "query": "help me decide between monorepo and polyrepo", "expected": "decision"}
+{"id": "decision-04", "query": "怎么选购机械键盘", "expected": "decision", "note": "关键词碰撞：『怎么选』命中 decision(21)，优先于 chat starter『怎么』(40)"}
+{"id": "helix-01", "query": "帮我做一个提醒喝水的小工具", "expected": "helix", "note": "依赖模糊需求启发式（vague verb 无具体实体）"}
+{"id": "helix-02", "query": "用苏格拉底式提问帮我澄清需求", "expected": "helix"}
+{"id": "helix-03", "query": "spec-first：我想先把验收标准定清楚", "expected": "helix"}
+{"id": "helix-04", "query": "帮我写个博客系统", "expected": "helix", "note": "关键词碰撞：chat starter『帮我写』让位于 helix(22) 的模糊需求启发"}
+{"id": "math-01", "query": "帮我计算 (128*46)/12 等于多少", "expected": "math"}
+{"id": "math-02", "query": "年化 3.5%，本金 20000，一年利息等于多少", "expected": "math"}
+{"id": "research-01", "query": "调研一下 2026 年 RAG 框架的最新进展，多源交叉核验", "expected": "research", "note": "含 search 关键词『最新』，research(28) 优先"}
+{"id": "research-02", "query": "do a literature review on vector databases with citations", "expected": "research"}
+{"id": "research-03", "query": "给我一份关于智能体安全的研究简报", "expected": "research"}
+{"id": "search-01", "query": "今天上海的天气怎么样", "expected": "search"}
+{"id": "search-02", "query": "英伟达最新股价是多少", "expected": "search"}
+{"id": "search-03", "query": "latest news about the EU AI Act", "expected": "search"}
+{"id": "chat-01", "query": "你好，介绍一下你自己", "expected": "chat"}
+{"id": "chat-02", "query": "解释一下什么是幂等性", "expected": "chat"}
+{"id": "chat-03", "query": "为什么天空是蓝色的", "expected": "chat"}
+{"id": "chat-04", "query": "hello there, what can you do", "expected": "chat"}
+{"id": "chat-05", "query": "总结一下这篇文章的主要观点", "expected": "chat"}
+{"id": "llm-01", "query": "量子技术会威胁现有的加密体系吗", "expects_llm": true}
+{"id": "llm-02", "query": "给我一份适合初学者的吉他练习计划", "expects_llm": true}
+{"id": "llm-03", "query": "compare the economics of solar vs nuclear power", "expects_llm": true}
+{"id": "gap-01", "query": "量子计算的原理是什么", "expects_llm": true, "known_gap": true, "note": "已知误报：『量子计算』命中 math 关键词『计算』的子串匹配 —— 分类器改进项，修复后应更新本条"}

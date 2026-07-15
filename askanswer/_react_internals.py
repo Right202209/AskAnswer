@@ -1,6 +1,8 @@
-"""React 子图（answer ⇄ tools）的内部节点实现。
+"""React 子图（answer ⇄ tools）的工具执行与 HITL 管线。
 
 这些函数不是包的公开接口 —— 一律通过 ``react.build_react_subgraph`` 间接使用。
+主推理节点 ``_answer_node``（模型路由 / 上下文预算 / prompt 组装）在
+``answering.py``；本文件只保留工具分发与确认执行。
 
 工具路由策略：
 
@@ -16,115 +18,18 @@ from __future__ import annotations
 
 import time
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
+from .answering import _emit_tool_telemetry
 from .audit import log_event, summarize_args
 from .confirmations import get_confirmation_handler
-from .intents import get_intent_registry
-from .load import model
 from .registry import get_registry
 from .schema import ContextSchema
 from .state import SearchState
-
-
-def _emit_tool_telemetry(
-    *,
-    tool_name: str,
-    duration_ms: int | None = None,
-    error: str | None = None,
-) -> None:
-    """把一次工具调用发到 telemetry（独立于 audit 写入路径，共享最小 schema）。
-
-    lazy import：本模块顶层不依赖 telemetry（对齐 execution-plan 2.2 的不变量）；
-    telemetry 未启用时 ``emit_event`` 内部会立即返回，零开销。
-    """
-    from . import telemetry
-
-    telemetry.emit_event(
-        kind="tool_call",
-        tool_name=tool_name,
-        duration_ms=duration_ms,
-        error=error,
-    )
-
-
-def _reclassify_intent(state: SearchState) -> str | None:
-    """根据“最新一条用户消息”重新判定 intent，让会话中途切换主题时也能换工具集。
-
-    返回新的 intent 字符串；返回 ``None`` 表示这次不需要切换（例如最新一条不是
-    新的真人输入，或本地分类器拿不准）。
-    """
-    if state.get("step") == "retry_search":
-        # sorcery 触发的“重新搜索” HumanMessage 是合成的，不是真正的新一轮提问，
-        # 原始 intent 已在 understand 阶段确定，且这里只可能是 search，跳过避免反转。
-        return None
-    messages = state.get("messages") or []
-    if not messages:
-        return None
-    last = messages[-1]
-    # 工具调用回填的消息不是 HumanMessage，跳过避免在工具链中途切换 intent
-    if not isinstance(last, HumanMessage):
-        return None
-    fields = get_intent_registry().classify_local(getattr(last, "content", "") or "")
-    if fields is None:
-        return None
-    return fields.intent
-
-
-def _answer_node(state: SearchState) -> dict:
-    """react 主推理节点：根据 intent 拼 system prompt、绑定对应工具、调用 LLM。"""
-    # 中途话题切换的兜底：用户突然从 chat 转到 sql 等，需要切换工具集
-    new_intent = _reclassify_intent(state)
-    intent = new_intent or state.get("intent", "search")
-    handler = get_intent_registry().get(intent)
-    context_line = handler.prompt_hint(state)
-    retry_directive = dict(state.get("retry_directive") or {})
-    if retry_directive:
-        directive = retry_directive.get("instruction") or retry_directive
-        context_line = f"{context_line}\n\n上一次回答不够，请按以下指引重试：{directive}"
-
-    # 从注册表按 handler 的 tag 集合取工具，新增 intent 不必改 registry 常量。
-    bundle_tools = get_registry().list(tags=handler.bundle_tags)
-    tool_names = ", ".join(t.name for t in bundle_tools) or "(无)"
-
-    system_prompt = (
-        "你可以调用工具来协助用户。\n"
-        f"当前可用工具：{tool_names}。\n"
-        "若用户需要相应信息，直接调用对应工具；否则结合上下文直接回答。\n\n"
-        f"用户查询解析：{state.get('user_query', '')}\n"
-        f"{context_line}"
-    )
-
-    # 没有可用工具时退化为纯对话；否则把工具绑定后再调用
-    bound = model.bind_tools(bundle_tools) if bundle_tools else model
-    msgs = [SystemMessage(content=system_prompt)] + list(state["messages"])
-    response = bound.invoke(msgs)
-
-    # LLM 是否要求继续调用工具
-    tool_calls = getattr(response, "tool_calls", None) or []
-    if tool_calls:
-        out: dict = {"step": "tool_called", "messages": [response]}
-        if retry_directive:
-            out["retry_directive"] = {}
-        # 中途切换 intent 时，把新 intent 写回 state，下一轮 tool 选择就会变化
-        if new_intent and new_intent != state.get("intent"):
-            out["intent"] = new_intent
-        return out
-    # LLM 直接给出最终答案，准备进入 sorcery 节点评估
-    out = {
-        "final_answer": response.content,
-        "step": "completed",
-        "messages": [response],
-    }
-    if retry_directive:
-        out["retry_directive"] = {}
-    if new_intent and new_intent != state.get("intent"):
-        out["intent"] = new_intent
-    return out
 
 
 def _confirm_plan_node(state: SearchState) -> dict:

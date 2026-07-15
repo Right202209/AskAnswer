@@ -43,6 +43,30 @@ app.invoke(
 
 CLI / HTTP 服务会把 `.env` 中的 `WLANGGRAPH_POSTGRES_DSN` / `ASKANSWER_DB_DIALECT` / `ASKANSWER_TENANT_ID` 注入 runtime context（`runner.runtime_context_from_env()`）。
 
+### 模型路由与成本控制（可选，默认关闭）
+
+按「角色」给不同任务配不同模型 —— 意图分类 / 质量评估 / 历史摘要是短输出或判别型
+任务，小模型即可；主回答保旗舰并可配跨厂商回退链。全部通过环境变量开启，未设置时
+行为与单模型模式完全一致（`/model` 热切换语义不变）：
+
+```
+ASKANSWER_MODEL_CLASSIFY=openai:gpt-4o-mini          # 意图分类
+ASKANSWER_MODEL_EVALUATE=openai:gpt-4o-mini          # 答案质量评估（LLM-as-judge）
+ASKANSWER_MODEL_SUMMARIZE=openai:gpt-4o-mini         # 历史摘要（digest=llm 时使用）
+ASKANSWER_MODEL_FALLBACKS_ANSWER=openai:gpt-4o,deepseek:deepseek-chat  # 主回答回退链
+ASKANSWER_CONTEXT_MAX_TOKENS=24000                   # answer 节点历史 token 预算
+ASKANSWER_CONTEXT_DIGEST=brief                       # 被裁历史摘要：brief / llm
+ASKANSWER_RUN_TOKEN_BUDGET=60000                     # 单轮 token 上限：超出后跳过质量重试
+```
+
+- 回退发生时写 `model_fallback` 审计事件，token 用量归因到**真正执行调用**的模型；
+  `/status` 会显示非默认路由，`/usage` 按模型标签分账（多厂商价格表见 `askanswer/pricing.py`）。
+- system prompt 按「稳定前缀 → 动态尾部」排序以命中各家 prompt cache；answer 路由指向
+  `anthropic:*` 时自动加 `cache_control` 断点。
+- 上线前效果预估：`python evals/run_intent_eval.py`（离线金标集：意图准确率 / 本地覆盖率 /
+  分类成本对比，见 `evals/README.md`）。设计与验证清单：
+  `docs/important-documentation-d1-routing-context-cost-eval.md`。
+
 ### 其他常用环境变量
 
 | 变量 | 说明 |

@@ -68,6 +68,23 @@ def summarize_args(args: Any, *, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def run_usage_so_far() -> tuple[int, int]:
+    """当前 run 已累计的 ``(input_tokens, output_tokens)``。
+
+    只读本次 run 的内存缓冲（挂起事件），不查库 —— 供 sorcery 的成本闸门在
+    「是否继续质量重试」前做零开销判断。缓冲不存在（begin_run 之外）时返回 0。
+    """
+    pending = _PENDING.get() or []
+    input_total = 0
+    output_total = 0
+    for event in pending:
+        if event.get("kind") != "llm_call":
+            continue
+        input_total += event.get("input_tokens") or 0
+        output_total += event.get("output_tokens") or 0
+    return input_total, output_total
+
+
 def log_event(
     *,
     kind: str,
@@ -78,6 +95,7 @@ def log_event(
     model_label: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    cached_tokens: int | None = None,
     duration_ms: int | None = None,
     intent: str | None = None,
     error: str | None = None,
@@ -97,6 +115,9 @@ def log_event(
         "model_label": model_label,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        # cached_tokens 目前仅在内存事件里流转（成本闸门/回归报告可读），
+        # 落库需要 schema v5 加列 —— 见 important-documentation-d1 的后续项。
+        "cached_tokens": cached_tokens,
         "duration_ms": duration_ms,
         "intent": intent,
         "error": error,
@@ -164,12 +185,13 @@ class LLMUsageCallback(BaseCallbackHandler):
         self.started_at = time.monotonic()
 
     def on_llm_end(self, response, **kwargs) -> None:
-        input_tokens, output_tokens = _extract_usage(response)
+        input_tokens, output_tokens, cached_tokens = _extract_usage(response)
         log_event(
             kind="llm_call",
             model_label=self.model_label,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
             duration_ms=int((time.monotonic() - self.started_at) * 1000),
         )
 
@@ -197,8 +219,12 @@ def with_llm_audit_callback(config: Any, *, model_label: str) -> dict:
     return cfg
 
 
-def _extract_usage(response) -> tuple[int | None, int | None]:
+def _extract_usage(response) -> tuple[int | None, int | None, int | None]:
     """Best-effort extraction across LangChain provider variants.
+
+    返回 ``(input, output, cached_input)``。cached_input 兼容三种来源：
+    OpenAI ``prompt_tokens_details.cached_tokens``、Anthropic
+    ``cache_read_input_tokens``、LangChain 标准 ``input_token_details.cache_read``。
 
     Iterates candidates lazily so a provider that puts usage in ``llm_output``
     doesn't pay the cost of scanning every generation message.
@@ -218,9 +244,16 @@ def _extract_usage(response) -> tuple[int | None, int | None]:
             "completion_token_count",
             "output_token_count",
         )
-        if input_tokens is not None or output_tokens is not None:
-            return input_tokens, output_tokens
-    return None, None
+        if input_tokens is None and output_tokens is None:
+            continue
+        cached_tokens = _first_int(
+            usage,
+            "cache_read_input_tokens",
+            ("input_token_details", "cache_read"),
+            ("prompt_tokens_details", "cached_tokens"),
+        )
+        return input_tokens, output_tokens, cached_tokens
+    return None, None, None
 
 
 def _candidate_usages(response):
@@ -248,9 +281,13 @@ def _candidate_usages(response):
                         yield value
 
 
-def _first_int(mapping: dict, *keys: str) -> int | None:
+def _first_int(mapping: dict, *keys) -> int | None:
+    """按序取第一个能转成 int 的键；键可以是 str，也可以是 (外层, 内层) 路径元组。"""
     for key in keys:
-        value = mapping.get(key)
+        path = key if isinstance(key, tuple) else (key,)
+        value: Any = mapping
+        for part in path:
+            value = value.get(part) if isinstance(value, dict) else None
         if value is None:
             continue
         try:
