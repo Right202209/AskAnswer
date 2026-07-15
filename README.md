@@ -2,7 +2,7 @@
 
 基于 LangGraph 的命令行智能助手：按意图分流到「读本地文件 / 联网搜索 / SQL 查询 / 调研简报 / 决策备忘 / 规格演化 / 直接回答」，由 LLM 调度工具并整合结果，支持 HITL 确认、会话持久化、时间旅行与 Markdown 渲染。
 
-当前状态（2026-07-12）：`master` 干净；`pytest` 全绿（112）；GitHub Actions 对 Python 3.10 / 3.12 跑 ruff + pytest。CLI 已拆成 `askanswer/cli/` 包，与 HTTP/SSE 服务共用 `runner` 事件流。
+当前状态（2026-07-16）：分层 `settings.json`（类似 Claude Code）+ `.env` 保底；`pytest` 全绿；GitHub Actions 对 Python 3.10 / 3.12 跑 ruff + pytest。CLI 已拆成 `askanswer/cli/` 包，与 HTTP/SSE 服务共用 `runner` 事件流。
 
 ## 安装
 
@@ -14,21 +14,147 @@ pip install -e ".[dev]"     # + pytest / ruff
 
 ## 配置
 
-在项目根目录创建 `.env`（可参考 `.env.example`）：
+配置由 `load.py` → `settings.bootstrap_environ()` 在导入时装载。支持 **settings.json**（推荐）与 **`.env`**（保底）并存；运行时一切仍落成环境变量，其余代码只读 `os.environ`。
+
+### 优先级（高 → 低）
+
+| 顺序 | 来源 | 说明 |
+| --- | --- | --- |
+| 1 | **进程环境变量** | shell / CI `export`；启动前已存在的键**永不被文件覆盖** |
+| 2 | **Local settings** | `<repo>/.askanswer/settings.local.json`（个人，已 gitignore） |
+| 3 | **Project settings** | `<repo>/.askanswer/settings.json`（可提交，团队共享） |
+| 4 | **User settings** | `~/.askanswer/settings.json`（跨项目；见路径说明） |
+| 5 | **`.env`** | 项目根目录；**最低保底**，只填补仍空缺的变量 |
+
+> 实现要点：先快照进程已有键 → `load_dotenv(override=False)` → settings 以 `override=True` 盖过 `.env`，但 `protect` 快照键。损坏或缺失的 JSON 静默忽略，不阻塞启动。
+
+### 快速上手
+
+**方式 A — 只用 `.env`（最简单）**
+
+```bash
+cp .env.example .env
+# 编辑 OPENAI_API_KEY / TAVILY_API_KEY 等
+```
+
+**方式 B — settings.json（推荐结构化配置）**
+
+```bash
+mkdir -p ~/.askanswer
+cp settings.example.json ~/.askanswer/settings.json
+# 或项目级：mkdir -p .askanswer && cp settings.example.json .askanswer/settings.json
+# 个人覆盖（勿提交）：cp settings.example.json .askanswer/settings.local.json
+```
+
+密钥可放在 settings 的 `env` 块，也可继续放在 `.env` 做保底；进程里 `export` 的值始终最高。
+
+### settings.json（类似 Claude Code）
+
+#### 路径
+
+| 作用域 | 默认路径 | 覆盖方式 |
+| --- | --- | --- |
+| User | `~/.askanswer/settings.json` | `$XDG_CONFIG_HOME/askanswer/settings.json`，或 `ASKANSWER_SETTINGS=/path/to.json` |
+| Project | `<repo>/.askanswer/settings.json` | 从 cwd 向上找 `.git` / `pyproject.toml` / `.askanswer` |
+| Local | `<repo>/.askanswer/settings.local.json` | 同 project；gitignored |
+
+完整模板：[`settings.example.json`](settings.example.json)。
+
+#### 示例
+
+```json
+{
+  "model": "openai:gpt-5.4",
+  "models": {
+    "classify": "openai:gpt-4o-mini",
+    "evaluate": "openai:gpt-4o-mini",
+    "summarize": "openai:gpt-4o-mini",
+    "fallbacks": {
+      "answer": ["openai:gpt-4o", "deepseek:deepseek-chat"]
+    }
+  },
+  "context": { "max_tokens": 24000, "digest": "brief" },
+  "run_token_budget": 60000,
+  "tenant_id": "alice",
+  "db_path": "~/.askanswer/state.db",
+  "mcp_all_intents": false,
+  "env": {
+    "OPENAI_API_KEY": "sk-...",
+    "TAVILY_API_KEY": "...",
+    "OPENWEATHER_API_KEY": ""
+  }
+}
+```
+
+#### 一等字段 → 环境变量
+
+| JSON 字段 | 展开为 | 说明 |
+| --- | --- | --- |
+| `model` | `ASKANSWER_DEFAULT_MODEL` | 启动默认模型（`/model` 仍可热切换） |
+| `models.classify` / `.evaluate` / `.summarize` / `.answer` | `ASKANSWER_MODEL_<ROLE>` | 按角色路由 |
+| `models.fallbacks.<role>` | `ASKANSWER_MODEL_FALLBACKS_<ROLE>` | 数组会拼成逗号分隔列表 |
+| `context.max_tokens` | `ASKANSWER_CONTEXT_MAX_TOKENS` | answer 历史 token 预算 |
+| `context.digest` | `ASKANSWER_CONTEXT_DIGEST` | `brief` 或 `llm` |
+| `run_token_budget` | `ASKANSWER_RUN_TOKEN_BUDGET` | 单轮 token 上限 |
+| `tenant_id` / `tenantId` | `ASKANSWER_TENANT_ID` | 多租户隔离 |
+| `db_path` / `dbPath` | `ASKANSWER_DB_PATH` | SQLite 状态库路径 |
+| `db_dialect` / `dbDialect` | `ASKANSWER_DB_DIALECT` | SQL agent 方言 |
+| `mcp_profile` / `mcpProfile` | `ASKANSWER_MCP_PROFILE` | MCP 自动连接 profile |
+| `mcp_all_intents` / `mcpAllIntents` | `ASKANSWER_MCP_ALL_INTENTS` | bool → `1` / `0` |
+| `server_token` / `serverToken` | `ASKANSWER_SERVER_TOKEN` | HTTP Bearer |
+| `env` | 任意键原样写入 | **同名时覆盖**上方一等字段 |
+
+### `.env`（最低保底）
+
+项目根目录创建 `.env`（参考 [`.env.example`](.env.example)）。仅在变量尚未被进程或 settings 设置时生效：
 
 ```
 OPENAI_API_KEY=...
 OPENAI_BASE_URL=...           # 可选
-TAVILY_API_KEY=...
-OPENWEATHER_API_KEY=...       # 可选，启用天气工具
-WLANGGRAPH_POSTGRES_DSN=postgresql://user:password@localhost:5432/dbname  # 可选，SQL agent 默认库
-ASKANSWER_DB_DIALECT=         # 可选；留空时从连接自动推断
+TAVILY_API_KEY=...            # 联网搜索
+OPENWEATHER_API_KEY=...       # 可选，天气工具
+WLANGGRAPH_POSTGRES_DSN=...   # 可选，SQL agent 默认库
+ASKANSWER_DB_DIALECT=         # 可选；留空则从连接推断
 ASKANSWER_DB_PATH=            # 可选；默认 ~/.askanswer/state.db
-ASKANSWER_TENANT_ID=          # 可选；多租户隔离
-ASKANSWER_SERVER_TOKEN=       # 可选；HTTP 服务 Bearer 鉴权
+ASKANSWER_TENANT_ID=          # 可选；多租户
+ASKANSWER_SERVER_TOKEN=       # 可选；HTTP 鉴权
+ASKANSWER_DEFAULT_MODEL=      # 可选；默认 openai:gpt-5.4
 ```
 
-SQL agent 从 LangGraph runtime context 读库配置（不写进 `SearchState`）：
+### 模型路由与成本控制（可选，默认关闭）
+
+按角色给不同任务配不同模型：分类 / 评估 / 摘要用小模型，主回答可配跨厂商回退链。未设置时与单模型模式完全一致（`/model` 语义不变）。
+
+**推荐写在 settings.json**（见上表 `models` / `context` / `run_token_budget`），等价环境变量：
+
+```
+ASKANSWER_MODEL_CLASSIFY=openai:gpt-4o-mini
+ASKANSWER_MODEL_EVALUATE=openai:gpt-4o-mini
+ASKANSWER_MODEL_SUMMARIZE=openai:gpt-4o-mini
+ASKANSWER_MODEL_FALLBACKS_ANSWER=openai:gpt-4o,deepseek:deepseek-chat
+ASKANSWER_CONTEXT_MAX_TOKENS=24000
+ASKANSWER_CONTEXT_DIGEST=brief
+ASKANSWER_RUN_TOKEN_BUDGET=60000
+```
+
+- 回退写 `model_fallback` 审计事件；token 归因到**真正执行**的模型；`/status` 显示非默认路由，`/usage` 按标签分账（价格表见 `askanswer/pricing.py`）。
+- system prompt 按「稳定前缀 → 动态尾部」排序以命中 prompt cache；answer 指向 `anthropic:*` 时自动加 `cache_control`。
+- 离线评测：`python evals/run_intent_eval.py`（见 `evals/README.md`）；设计说明：`docs/important-documentation-d1-routing-context-cost-eval.md`。
+
+### 其他常用环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `ASKANSWER_SETTINGS` | 覆盖 **user** 层 settings.json 路径 |
+| `ASKANSWER_MCP_ALL_INTENTS` | `1` 时 MCP 工具对所有意图可见（默认仅 chat） |
+| `ASKANSWER_READ_FILE_MAX_BYTES` | `read_file` 上限（默认 10 MB） |
+| `ASKANSWER_WRITE_FILE_MAX_BYTES` | `write_file` 上限（默认 1 MB） |
+| `ASKANSWER_SHELL_OUTPUT_MAX_BYTES` | shell 每路输出上限（默认 64 KB） |
+| `LANGSMITH_API_KEY` / `ASKANSWER_OTEL_EXPORTER` | 可选可观测导出（关则零开销） |
+
+### 库 API 与 runtime context
+
+SQL agent 等从 LangGraph runtime context 读库配置（不写进 `SearchState`）：
 
 ```python
 from askanswer.graph import create_search_assistant
@@ -41,41 +167,7 @@ app.invoke(
 )
 ```
 
-CLI / HTTP 服务会把 `.env` 中的 `WLANGGRAPH_POSTGRES_DSN` / `ASKANSWER_DB_DIALECT` / `ASKANSWER_TENANT_ID` 注入 runtime context（`runner.runtime_context_from_env()`）。
-
-### 模型路由与成本控制（可选，默认关闭）
-
-按「角色」给不同任务配不同模型 —— 意图分类 / 质量评估 / 历史摘要是短输出或判别型
-任务，小模型即可；主回答保旗舰并可配跨厂商回退链。全部通过环境变量开启，未设置时
-行为与单模型模式完全一致（`/model` 热切换语义不变）：
-
-```
-ASKANSWER_MODEL_CLASSIFY=openai:gpt-4o-mini          # 意图分类
-ASKANSWER_MODEL_EVALUATE=openai:gpt-4o-mini          # 答案质量评估（LLM-as-judge）
-ASKANSWER_MODEL_SUMMARIZE=openai:gpt-4o-mini         # 历史摘要（digest=llm 时使用）
-ASKANSWER_MODEL_FALLBACKS_ANSWER=openai:gpt-4o,deepseek:deepseek-chat  # 主回答回退链
-ASKANSWER_CONTEXT_MAX_TOKENS=24000                   # answer 节点历史 token 预算
-ASKANSWER_CONTEXT_DIGEST=brief                       # 被裁历史摘要：brief / llm
-ASKANSWER_RUN_TOKEN_BUDGET=60000                     # 单轮 token 上限：超出后跳过质量重试
-```
-
-- 回退发生时写 `model_fallback` 审计事件，token 用量归因到**真正执行调用**的模型；
-  `/status` 会显示非默认路由，`/usage` 按模型标签分账（多厂商价格表见 `askanswer/pricing.py`）。
-- system prompt 按「稳定前缀 → 动态尾部」排序以命中各家 prompt cache；answer 路由指向
-  `anthropic:*` 时自动加 `cache_control` 断点。
-- 上线前效果预估：`python evals/run_intent_eval.py`（离线金标集：意图准确率 / 本地覆盖率 /
-  分类成本对比，见 `evals/README.md`）。设计与验证清单：
-  `docs/important-documentation-d1-routing-context-cost-eval.md`。
-
-### 其他常用环境变量
-
-| 变量 | 说明 |
-| --- | --- |
-| `ASKANSWER_MCP_ALL_INTENTS` | `1` 时 MCP 工具对所有意图可见（默认仅 chat） |
-| `ASKANSWER_READ_FILE_MAX_BYTES` | `read_file` 上限（默认 10 MB） |
-| `ASKANSWER_WRITE_FILE_MAX_BYTES` | `write_file` 上限（默认 1 MB） |
-| `ASKANSWER_SHELL_OUTPUT_MAX_BYTES` | shell 每路输出上限（默认 64 KB） |
-| `LANGSMITH_API_KEY` / `ASKANSWER_OTEL_EXPORTER` | 可选可观测导出（关则零开销） |
+CLI / HTTP 会把环境中的 `WLANGGRAPH_POSTGRES_DSN` / `ASKANSWER_DB_DIALECT` / `ASKANSWER_TENANT_ID` 注入 context（`runner.runtime_context_from_env()`），来源可以是 settings、`.env` 或进程 export。
 
 ## 使用
 
@@ -190,9 +282,11 @@ askanswer/
 ├── telemetry/           # LangSmith + OTEL（env 门控）
 ├── intents/             # chat / search / file_read / sql / math / helix / research / decision
 ├── sqlagent/ / helix/ / research/ / decision/   # 子图 → 注册为工具
-├── load.py              # 模型代理（/model 热切换）、Tavily、.env
+├── load.py              # 模型代理（/model 热切换）、Tavily、配置 bootstrap
+├── settings.py          # settings.json 分层 + .env 保底（bootstrap_environ）
 └── ui_input.py / ui_select.py / ui_spinner.py
 ```
+
 
 ## 工作流
 

@@ -10,3 +10,5 @@ AGENTS.md
 build/
 dist/
 ouroboros/
+# Project-local AskAnswer settings (personal overrides; do not commit secrets)
+.askanswer/settings.local.json

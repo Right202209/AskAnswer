@@ -1,0 +1,29 @@
+{
+  "$comment": "Copy to ~/.askanswer/settings.json (user) or .askanswer/settings.json (project). Local overrides: .askanswer/settings.local.json (gitignored). Precedence: process env > local > project > user > .env (lowest baseline).",
+  "model": "openai:gpt-5.4",
+  "models": {
+    "classify": "openai:gpt-4o-mini",
+    "evaluate": "openai:gpt-4o-mini",
+    "summarize": "openai:gpt-4o-mini",
+    "fallbacks": {
+      "answer": ["openai:gpt-4o", "deepseek:deepseek-chat"]
+    }
+  },
+  "context": {
+    "max_tokens": 24000,
+    "digest": "brief"
+  },
+  "run_token_budget": 60000,
+  "mcp_all_intents": false,
+  "env": {
+    "OPENAI_API_KEY": "sk-...",
+    "OPENAI_BASE_URL": "",
+    "TAVILY_API_KEY": "",
+    "OPENWEATHER_API_KEY": "",
+    "WLANGGRAPH_POSTGRES_DSN": "",
+    "ASKANSWER_DB_DIALECT": "",
+    "ASKANSWER_TENANT_ID": "",
+    "ASKANSWER_DB_PATH": "",
+    "ASKANSWER_SERVER_TOKEN": ""
+  }
+}

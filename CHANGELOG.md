@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-07-16 · settings.json configuration layers
+
+### Added
+- `askanswer/settings.py`: Claude Code–style hierarchical JSON config — **user** (`~/.askanswer/settings.json` / `XDG_CONFIG_HOME` / `ASKANSWER_SETTINGS`), **project** (`.askanswer/settings.json`), **local** (`.askanswer/settings.local.json`, gitignored). Deep-merge, corrupt-file tolerance, `env` block plus first-class keys (`model`, `models` + fallbacks, `tenant_id`, `db_path`, `context`, `run_token_budget`, `mcp_all_intents`, …) expanded to the same env vars the rest of the codebase already reads.
+- `settings.example.json` template; `tests/test_settings.py` covers merge priority, expand, setdefault, walk-up root discovery.
+
+### Changed
+- `load.py`: `bootstrap_environ()` — precedence **process env > settings.json (local/project/user) > `.env` (lowest baseline)**. `.env` only fills missing keys; settings override `.env` but never clobber shell/CI exports. Startup model reads `ASKANSWER_DEFAULT_MODEL` (set by settings `"model"` or env), default remains `openai:gpt-5.4`.
+
+### Verification
+- `pytest tests/test_settings.py -q` + full suite; `ruff check askanswer/settings.py askanswer/load.py tests/test_settings.py`.
+
 ## 2026-07-15 · model routing, context budget, cost guard, eval baseline (D1)
 
 ### Added

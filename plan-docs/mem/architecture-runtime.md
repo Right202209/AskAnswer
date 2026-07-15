@@ -42,9 +42,13 @@ Background-thread Braille spinner used during waits between node updates. `start
 
 `select_option(options, *, prompt, default, free_input_label, free_input_prompt)` is the shared up/down menu. It uses `termios` + `tty.setcbreak` in TTY mode (↑/↓ or k/j to navigate, Enter to confirm, Esc/Ctrl-C to cancel returning `CANCELLED == -1`, digits 1-9 to jump). When stdin/stdout is not a TTY it falls back to numbered text input. If `free_input_label` is set, it's appended as the last menu entry; selecting it triggers a free-text prompt and the typed string is returned as the second tuple element. Used by both the HITL shell consent and the Helix interview.
 
+## Configuration layers (`askanswer/settings.py` + `.env`)
+
+At import time `load.py` calls `bootstrap_environ()`: snapshot pre-existing process env keys → `load_dotenv(override=False)` as the **lowest baseline** → `apply_settings(override=True, protect=snapshot)` so settings override `.env` but never clobber shell/CI exports. Settings are Claude Code–style JSON layers (user → project → local). Paths: `~/.askanswer/settings.json` (or `ASKANSWER_SETTINGS` / `XDG_CONFIG_HOME/askanswer/settings.json`), `<repo>/.askanswer/settings.json`, `<repo>/.askanswer/settings.local.json`. First-class keys and the `env` block both map onto the same `ASKANSWER_*` / provider keys the rest of the code already reads via `os.environ`.
+
 ## Model loading & swap (`askanswer/load.py`)
 
-`model` is a `_ModelProxy` wrapping the real `init_chat_model(...)` backend. Modules import it once at startup; `set_model("provider:name")` (called by `/model`) builds a new backend and `_swap`s it in place via `object.__setattr__`, so every existing reference is automatically redirected. **Always import `model` from `.load` and call through it** — never cache the inner backend, or you'll keep talking to the old model after `/model`. `current_model_label()` returns the active `provider:spec` for diagnostics.
+`model` is a `_ModelProxy` wrapping the real `init_chat_model(...)` backend. Modules import it once at startup; `set_model("provider:name")` (called by `/model`) builds a new backend and `_swap`s it in place via `object.__setattr__`, so every existing reference is automatically redirected. **Always import `model` from `.load` and call through it** — never cache the inner backend, or you'll keep talking to the old model after `/model`. `current_model_label()` returns the active `provider:spec` for diagnostics. Startup default comes from `ASKANSWER_DEFAULT_MODEL` (settings `"model"` writes this) or `openai:gpt-5.4`.
 
 ## Audit + cost (`askanswer/audit.py`, `askanswer/pricing.py`)
 

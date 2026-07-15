@@ -4,14 +4,15 @@
 # - 同时初始化 Tavily 搜索客户端、读取 OpenWeather Key 等运行时常量。
 import os
 
-from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from tavily import TavilyClient
 
 from .audit import with_llm_audit_callback
+from .settings import bootstrap_environ
 
-# override=True：让 .env 中的值覆盖已经存在的同名环境变量，便于本地调试。
-load_dotenv(override=True)
+# 配置优先级（高 → 低）：进程已有 env > settings.json 分层 > .env 保底。
+# 详见 askanswer/settings.py::bootstrap_environ。
+bootstrap_environ()
 
 
 # init_chat_model 默认参数：不开启采样、最多重试 3 次、单次超时 120 秒。
@@ -164,9 +165,19 @@ def _telemetry_callback(model_label: str):
     return telemetry.llm_callback(model_label)
 
 
-# 启动时的默认模型，可以通过 /model 命令运行时替换
-_INITIAL_SPEC = "gpt-5.4"
-_INITIAL_PROVIDER = "openai"
+# 启动时的默认模型，可以通过 /model 命令运行时替换。
+# settings.json 的 "model" / env ASKANSWER_DEFAULT_MODEL 可覆盖默认值。
+def _initial_model() -> tuple[str, str]:
+    raw = (os.getenv("ASKANSWER_DEFAULT_MODEL") or "openai:gpt-5.4").strip()
+    if ":" in raw:
+        provider, spec = raw.split(":", 1)
+        provider, spec = provider.strip() or "openai", spec.strip()
+        if spec:
+            return spec, provider
+    return (raw or "gpt-5.4"), "openai"
+
+
+_INITIAL_SPEC, _INITIAL_PROVIDER = _initial_model()
 
 # 模块级单例：所有节点 / 工具都直接 `from .load import model` 使用它。
 # inner=None → 惰性构造：首次调用（invoke/stream/bind_tools…）时才建模型，
