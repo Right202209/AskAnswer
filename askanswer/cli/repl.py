@@ -10,7 +10,6 @@ from ..ui_input import make_session, read_line
 from .commands import handle_command
 from .render import render_error, tips_block, welcome_box
 from .stream import stream_query
-from .text import _term_width
 from .theme import C, _console
 
 
@@ -73,14 +72,18 @@ def _build_status_provider(thread_box: list[str]):
 
 
 def _draw_top_border() -> None:
-    """与 prompt_toolkit 输入区配套的视觉上边框；下边框由 ``_draw_bottom_border`` 收尾。"""
-    w = _term_width()
-    _console.print(f"[muted]╭{'─' * (w - 2)}╮[/]")
+    """输入区上边框（PTK 外 print）。
+
+    故意不画满终端宽：全宽 ``╭──…──╮`` 在 SIGWINCH 缩窄时会被终端 reflow
+    折成多行，看起来像同一行边框/文字被画了多次（与 PTK #1933 同类问题）。
+    短装饰线与左侧 ``│`` gutter 对齐，任意窄终端都不会二次折行。
+    """
+    _console.print("[muted]╭──[/]")
 
 
 def _draw_bottom_border() -> None:
-    w = _term_width()
-    _console.print(f"[muted]╰{'─' * (w - 2)}╯[/]")
+    """输入结束后的下边框（同样保持短行，避免 resize reflow 叠行）。"""
+    _console.print("[muted]╰──[/]")
 
 
 def interactive_loop(app) -> int:

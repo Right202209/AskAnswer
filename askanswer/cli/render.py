@@ -151,7 +151,8 @@ def help_block(target: str | None = None) -> None:
     print(f"   {C.CYAN}!<cmd>{C.RESET}    直接执行 shell 命令 (如 !ls -la)")
     print()
     print(f" {C.DIM}快捷键：↑/↓ 历史 · Ctrl-R 反向搜索 · "
-          f"行尾 \\ 多行续行 · Ctrl-C 取消（连按二次退出）{C.RESET}")
+          f"Alt+Enter / Ctrl-J 换行 · Enter 提交 · "
+          f"Ctrl-C 取消（连按二次退出）{C.RESET}")
     print()
 
 

@@ -30,6 +30,18 @@ def _visual_width(s: str) -> int:
     return w
 
 
+def _term_cols(min_cols: int = 20) -> int:
+    """当前终端全列数（不封顶），失败时回退 80。
+
+    用于输入框边框等需与终端等宽的绘制；欢迎面板等受控排版请用 ``_term_width``。
+    """
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 80
+    return max(min_cols, cols)
+
+
 def _term_width(max_width: int = 72) -> int:
     """当前终端宽度，限制在 [40, max_width] 区间，避免极端情况下排版崩溃。"""
     try:
