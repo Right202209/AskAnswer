@@ -1,14 +1,14 @@
 # React 子图：answer ⇄ tools 的循环，包含 HITL（人机确认）的 confirm_plan 旁路。
 # 该子图作为父图的 "answer" 节点被复用，意图无关 —— 真正的差异化体现在
-# _answer_node 的 system prompt 与 tool 绑定上。
+# _answer_node（answering.py）的 system prompt、模型路由与 tool 绑定上。
 from langgraph.graph import END, START, StateGraph
 
 from ._react_internals import (
-    _answer_node,
     _confirm_plan_node,
     _route_from_answer,
     _tools_node,
 )
+from .answering import _answer_node
 from .clarify import clarify_node
 from .schema import ContextSchema
 from .state import SearchState

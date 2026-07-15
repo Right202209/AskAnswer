@@ -2,12 +2,20 @@
 # 设计原则：先用本地正则/关键词做高置信度分类，避免每次都调用 LLM；
 # 仅当本地启发不确定时才回退到 LLM 来判定 intent。
 
+import os
+
 from langchain_core.messages import AIMessage, SystemMessage
 
+from .audit import log_event, run_usage_so_far
 from .intents import get_intent_registry
 from .intents.base import IntentClassification
-from .load import model
+from .routing import ROLE_CLASSIFY, model_for
 from .state import SearchState
+
+
+# 单轮 run 的 token 预算（输入+输出合计）。超过后 sorcery 不再触发质量重试，
+# 直接交付现有答案 —— 质量重试是「锦上添花」的开销，预算耗尽时优先止损。
+_RUN_TOKEN_BUDGET_ENV = "ASKANSWER_RUN_TOKEN_BUDGET"
 
 
 def _local_intent(user_message: str, *, fallback: bool = False) -> dict | None:
@@ -48,7 +56,7 @@ def _intent_from_llm(user_message: str) -> dict:
         "search_query 仅 search 时填写最佳关键词，否则为空字符串。\n"
         "understanding 填写对用户需求的简要总结。"
     )
-    classifier = model.with_structured_output(IntentClassification)
+    classifier = model_for(ROLE_CLASSIFY).with_structured_output(IntentClassification)
     response = classifier.invoke([SystemMessage(content=prompt)])
     return _normalize_intent(response.model_dump(), user_message)
 
@@ -96,12 +104,44 @@ def understand_query_node(state: SearchState) -> dict:
     }
 
 
+def _run_budget_stop_reason() -> str | None:
+    """成本闸门：本轮 token 消耗超出预算时返回停止原因；未配置/未超出返回 None。
+
+    读取的是 audit 在本次 run 内累计的 llm_call 用量（内存缓冲，不查库），
+    因此闸门本身零额外开销；预算未配置时完全不启用（非回归默认）。
+    """
+    raw = os.environ.get(_RUN_TOKEN_BUDGET_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        budget = int(raw)
+    except ValueError:
+        return None
+    if budget <= 0:
+        return None
+    used_input, used_output = run_usage_so_far()
+    used = used_input + used_output
+    if used < budget:
+        return None
+    return f"本轮已消耗约 {used} tokens ≥ 预算 {budget}，跳过质量重试直接收尾"
+
+
 def sorcery_answer_node(state: SearchState) -> dict:
     """父图第三个节点：把答案质量评估委托给当前 intent handler。"""
     handler = get_intent_registry().get(state.get("intent", "search"))
 
     retry_count = state.get("retry_count", 0)
     if retry_count >= handler.max_retries:
+        return _finalize(state)
+
+    # 成本闸门先于质量评估：预算耗尽时连评估这次 LLM 调用也省掉
+    budget_stop = _run_budget_stop_reason()
+    if budget_stop:
+        log_event(
+            kind="budget_stop",
+            intent=state.get("intent"),
+            args_summary=budget_stop,
+        )
         return _finalize(state)
 
     result = handler.evaluate(state)

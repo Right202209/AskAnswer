@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-07-15 · model routing, context budget, cost guard, eval baseline (D1)
+
+### Added
+- `askanswer/routing.py`: role-based model routing (`answer` / `classify` / `evaluate` / `summarize`) with per-role env overrides (`ASKANSWER_MODEL_<ROLE>`) and cross-provider fallback chains (`ASKANSWER_MODEL_FALLBACKS_<ROLE>`). `RoutedModel` replays `bind_tools` / `with_structured_output` onto each candidate, falls back on invoke/stream failure (stream: only before the first chunk), logs every failover as a `model_fallback` audit event, and attributes token usage to the model that actually executed. Default (no env) resolves every role to the global `_ModelProxy` — zero behavior change, `/model` hot-swap semantics intact.
+- `askanswer/context.py`: context-window budgeter for the answer node — CJK-aware token estimation, block-level trimming that never orphans tool-call/ToolMessage pairs, keeps the system prefix and the newest block, and returns an optional digest of dropped history (`brief` deterministic / `llm` via the `summarize` route with deterministic fallback). Opt-in via `ASKANSWER_CONTEXT_MAX_TOKENS` + `ASKANSWER_CONTEXT_DIGEST`; `state["messages"]` is never mutated (time travel / audit see full history).
+- `askanswer/answering.py`: `_answer_node` extracted from `_react_internals.py` (which drops back under the 300-line cap) and rebuilt around the routing + budget layers, with a prompt-cache-friendly system prompt (stable preamble → per-intent tool list → dynamic tail) and an Anthropic `cache_control` breakpoint on the stable prefix when the answer route targets `anthropic:*`.
+- Cost guard: `ASKANSWER_RUN_TOKEN_BUDGET` — when the current run's accumulated LLM tokens (from the in-memory audit buffer, `audit.run_usage_so_far`) exceed the budget, `sorcery_answer_node` skips quality-retry evaluation and finalizes, logging a `budget_stop` event.
+- `evals/`: 32-case golden intent-classification set (keyword-collision and known-gap cases included) + deterministic offline runner (`run_intent_eval.py`, no API calls) reporting accuracy, local-classifier coverage, latency percentiles and a routed-vs-flagship cost projection; `evals/README.md` pre-registers launch thresholds and the post-launch validation loop over `/usage` + `audit_event`.
+
+### Changed
+- `nodes.py` intent classification runs on `model_for(ROLE_CLASSIFY)`; `intents/search.py` LLM-as-judge evaluation on `model_for(ROLE_EVALUATE)` (both default to the global model until routed via env).
+- `audit.py` usage extraction now returns `(input, output, cached_input)` — cached tokens recognized across OpenAI `prompt_tokens_details.cached_tokens`, Anthropic `cache_read_input_tokens`, LangChain `input_token_details.cache_read`; events carry `cached_tokens` in-memory (SQLite column deferred to schema v5, see D1 doc follow-ups).
+- `pricing.py` rewritten as a multi-provider `(input, cached_input, output)` table (OpenAI / Anthropic / Google / DeepSeek / Qwen-via-OpenAI-compatible) with cache-discounted `estimate_cost_usd(..., cached_input_tokens=...)`; unknown labels still return `None` (no invented prices; the default `openai:gpt-5.4` is deliberately unlisted until verified).
+- `load.py`: removed dead `langchain_openai.OpenAI` import; `inject_llm_callbacks(..., label=...)` made public so routed calls attribute usage explicitly; added `build_backend` / `raw_backend` for the routing layer (raw backends only — callbacks are injected exactly once per call path).
+- CLI `/status` shows a `routes` row when (and only when) non-default role routes are configured (`_routes_row`).
+
+### Verification
+- **Not yet run** (code-only session per working agreement). Gate: matrix group **G8** in `docs/important-documentation-verification-matrix.md`; background, invariants and config matrix in `docs/important-documentation-d1-routing-context-cost-eval.md`. Static check performed: `python3 -m py_compile` over all touched files.
+
 ## 2026-07-12 · HTTP/SSE server (C3)
 
 ### Added

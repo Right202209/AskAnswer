@@ -25,6 +25,19 @@
 | `docs/important-documentation-c3-http-sse-server.md` | ?? | **C3** | 背景文档，随 C3 提交 |
 | `docs/important-documentation-verification-matrix.md` | ?? | 首个落地的 feature 提交携带 | 本文件 |
 | `tests/test_{confirmations,graph,intents,mcp_profile,persistence,registry,telemetry}.py` | ??×7 | **B2**（用户暂停中） | 已写、从未运行；`tests/conftest.py` 已随 B1 提交 |
+| `askanswer/routing.py` | ?? | **D1** | 角色路由 + 回退链（answer/classify/evaluate/summarize） |
+| `askanswer/context.py` | ?? | **D1** | 上下文 token 预算器 + digest（off/brief/llm） |
+| `askanswer/answering.py` | ?? | **D1** | `_answer_node` 拆出：路由 + 预算 + 缓存友好 prompt |
+| `askanswer/_react_internals.py` | M | **D1** | 移出 answer/reclassify/telemetry 三函数（375→280 行），`_tools_node` 等字节未变 |
+| `askanswer/react.py` | M | **D1** | `_answer_node` 改从 `answering` 导入（1 行归属变化） |
+| `askanswer/load.py` | M | **D1** | 删死导入；`inject_llm_callbacks(label=…)` / `build_backend` / `raw_backend` |
+| `askanswer/nodes.py` | M | **D1** | 分类走 ROLE_CLASSIFY；sorcery 成本闸门（budget_stop） |
+| `askanswer/intents/search.py` | M | **D1** | evaluate 走 ROLE_EVALUATE |
+| `askanswer/audit.py` | M | **D1** | usage 三元组（含 cached_tokens）+ `run_usage_so_far` |
+| `askanswer/pricing.py` | M | **D1** | 多厂商三元价格表 + 缓存折扣估价 |
+| `askanswer/cli.py`（`_routes_row` + status 3 行） | M | **D1** | `/status` routes 行（与 C2/C3 hunk 无交叠） |
+| `evals/{golden_intents.jsonl,run_intent_eval.py,README.md}` | ??×3 | **D1** | 意图金标集 + 离线评测 runner + 指标门槛 |
+| `docs/important-documentation-d1-routing-context-cost-eval.md` | ?? | **D1** | 背景/不变量/配置矩阵/自查结论，随 D1 提交 |
 | `.claude/mem/*.md` | gitignored | 本地 | 无需提交、无需运行验证 |
 
 **cli.py 拆 hunk（提交时必须执行）**：C3 仅两个 hunk —— ① import 区新增 `from .runner import runtime_context_from_env`（约 L58，diff 头 `@@ -55,6 +55,7`）；② `_runtime_context` 函数体改为委托（约 L469，diff 头 `@@ -465,12 +467,8`）。其余 7 个 hunk（ui_select import、`_PHASE_TEXT`、`_on_node_update`、`_render_node_update`、`_clarify_detail`、`_prompt_confirmation` 分发、`_prompt_clarification`）全部属于 C2。终端里用 `git add -p askanswer/cli.py` 按上述归属交互式staging。
@@ -98,6 +111,37 @@
 - [ ] **C3-R1** CLI 三场景（chat / file_read+clarify / shell 确认）行为与改动前一致 —— cli.py 的 C3 改动仅 `_runtime_context` 委托，重点确认 SQL intent 仍能拿到 `WLANGGRAPH_POSTGRES_DSN`。🔑（或 mock）
 - [ ] **C3-R2** `pip install -e .` 后 `askanswer-server` 入口可用（等价 `python -m askanswer.server`）。
 
+### G8 · D1 模型路由 / 上下文预算 / 成本 / 评测（mock LLM；建议 `tests/test_routing.py` / `test_context.py` / `test_pricing.py`）
+
+**默认零回归（免 key，先跑）**
+- [ ] **D1-R1** `python -m compileall askanswer evals` 通过；`python -c "import askanswer.routing, askanswer.context, askanswer.answering"` 无循环 import。
+- [ ] **D1-R2** 不设任何 `ASKANSWER_MODEL_*` / `ASKANSWER_CONTEXT_*` / `ASKANSWER_RUN_TOKEN_BUDGET` 时：`model_for(role)` 对四个角色都返回全局 `load.model` 本体（`is` 相等）；`describe_routes()` 每项显示「(全局 …)」。
+- [ ] **D1-R3** `askanswer --graph -` 拓扑与改动前逐字节一致（answering 拆分不改图结构）；`/status` 不含 routes 行。
+- [ ] **D1-R4** 默认下 `budget_messages(msgs, max_tokens=None)` 返回入参同一 list（`is` 相等，零估算）。
+
+**路由与回退（mock backend）**
+- [ ] **D1-U1** 设 `ASKANSWER_MODEL_CLASSIFY=openai:gpt-4o-mini` + `reset_router()`：`model_for("classify")` 返回 `RoutedModel`，`.label=="openai:gpt-4o-mini"`；`bind_tools`/`with_structured_output` 返回带累积 transform 的新 `RoutedModel`。
+- [ ] **D1-U2** 回退链：主候选 `invoke` 抛异常 → 落到下一候选返回其结果；写出 `kind="model_fallback"` 事件（label=失败候选、args_summary=`role=…`）。全部候选失败 → 抛最后一个异常。
+- [ ] **D1-U3** 用量归因：回退到第二候选成功时，`llm_call` 事件的 `model_label` == 第二候选标签（非路由入口标签）。断言 callback 恰好注入一次（不双计）。
+- [ ] **D1-U4** `stream`：首分片前失败才回退；已产出首分片后再抛 → 异常上抛、不切候选（用 mock 迭代器断言不重复输出）。
+- [ ] **D1-U5** `normalize_spec`：`"gpt-4o"→"openai:gpt-4o"`，`"anthropic:claude-…"` 原样；`FALLBACKS_` 逗号解析去空白。
+
+**上下文预算（纯逻辑，无 LLM）**
+- [ ] **D1-U6** system 前缀与最新消息永不裁剪；总量 > 预算时丢弃最旧块，`kept_tokens ≤ max_tokens`（除非最新块单块超预算，此时仅保留它）。
+- [ ] **D1-U7** 工具配对原子性：构造 `AIMessage(tool_calls)` + `ToolMessage` 相邻对，裁剪结果中**不存在**孤儿 ToolMessage（前面无对应 tool_calls 的 AIMessage）。
+- [ ] **D1-U8** digest：`off`→`digest_text==""`；`brief`→确定性文本含「已省略 N 条」；`llm`→调用 SUMMARIZE 路由，mock 抛异常时回退 brief（不崩）。摘要文本进入 system prompt 尾部、**不**作为独立消息插回。
+- [ ] **D1-U9** CJK token 估算：纯中文按 ~1.5 字符/token、纯 ASCII 按 ~4 字符/token，偏保守（估算 ≥ 粗略真实值）。
+
+**成本闸门与定价**
+- [ ] **D1-U10** `estimate_cost_usd("openai:gpt-4o-mini", 1000, 1000)` == 0.00015+0.00060=0.00075；带 `cached_input_tokens` 时缓存部分按缓存价、且 `cached>input` 被截断到 input；未登记标签 → None。
+- [ ] **D1-U11** `run_usage_so_far()` 累加当前 run 内 `llm_call` 的 input/output；run 外返回 (0,0)。
+- [ ] **D1-U12** 成本闸门：设 `ASKANSWER_RUN_TOKEN_BUDGET` 低于已用量 → `sorcery_answer_node` 走 `_finalize`、不调 `handler.evaluate`、写 `kind="budget_stop"`；预算未设 → 行为与改动前一致（仍可重试）。
+
+**评测 runner**
+- [ ] **D1-E1** `python evals/run_intent_eval.py` 退出码 0（或 1 且失败项与金标集 `known_gap` 一致）；Markdown 报告含准确率/本地覆盖率/延迟/成本预估四段。
+- [ ] **D1-E2** `--json` 输出可被 `json.loads`；`accuracy`/`local_coverage`/`llm_rate` 字段存在且 ∈ [0,1]。
+- [ ] **D1-E3** 金标集期望值与实际触发规则一致性抽查：`known_gap` 用例确实被误分类（复现），非 gap 用例 `classify_local` 结果 == 期望。
+
 ## 4. 提交闸门（全过对应组 + 附加动作后才可 commit）
 
 | 顺序 | commit message | 携带文件 | 前置组 | 附加动作 |
@@ -105,6 +149,7 @@
 | 1 | `feat: generic clarification protocol` | intents/4 文件、clarify.py、react.py、cli.py（**仅 C2 的 7 个 hunk**）、docs/…-c2-…md、本文件 | G0 + G2 + G3 + G4 | ① rules/security.md 逐项清单；② `CHANGELOG.md` 记 C2；③ 勾选 `plan-docs/02-execution-plan.md` 的 C2 框 |
 | 2 | `feat: http sse server` | runner.py、wire.py、server.py、cli.py（**剩余 2 个 C3 hunk**）、pyproject.toml、CLAUDE.md、docs/…-c3-…md | G5 + G6 + G7（且 C2 已提交） | 同上三步（CHANGELOG 记 C3；勾 C3 框） |
 | 3 | `test: cover persistence, confirmations, mcp profile, telemetry, registry` | tests/ 7 文件（+按 G2/G3/G5 新增的 test_clarify/test_runner/test_wire 等） | G1（用户解除 B2 暂停后） | 勾选 B2 框；按 B2 验收「≥25 用例」复核 |
+| 4 | `feat: model routing, context budget, cost guard and eval baseline` | routing.py、context.py、answering.py、_react_internals.py、react.py、load.py、nodes.py、intents/search.py、audit.py、pricing.py、cli.py（仅 `_routes_row` hunk）、evals/×3、docs/…-d1-…md、本文件增量 | G8（且 C2/C3 已提交，避免 cli.py hunk 交错） | ① rules/security.md 逐项清单；② `CHANGELOG.md` 已记 D1；③ 评测报告数字回填 `evals/README.md` 门槛表 |
 
 通用提交规则：`<type>: <description>` 格式、**无 Co-Authored-By**；每次提交前重跑该批次所属组中标 R 的非回归项。
 

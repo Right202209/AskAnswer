@@ -318,6 +318,27 @@ def mcp_help_block() -> None:
     print()
 
 
+def _routes_row() -> str | None:
+    """/status 的 routes 行：仅在配置了非默认角色路由时返回摘要，否则 None。
+
+    默认场景（未设 ASKANSWER_MODEL_* 环境变量）不展示，避免状态面板噪音。
+    """
+    try:
+        from .routing import describe_routes, get_router
+
+        router = get_router()
+        routed = {
+            role: chain
+            for role, chain in describe_routes().items()
+            if not router.route(role).is_default
+        }
+    except Exception:
+        return None
+    if not routed:
+        return None
+    return "; ".join(f"{role}={chain}" for role, chain in routed.items())
+
+
 def status_block(thread_id: str) -> None:
     """/status 输出：当前线程 ID、CWD、模型、MCP 连接状态、持久化信息。"""
     # 一对 (label, value) 行；None 值会被跳过
@@ -330,6 +351,9 @@ def status_block(thread_id: str) -> None:
         rows.append(("title", meta.title))
     rows.append(("cwd", str(Path.cwd())))
     rows.append(("model", current_model_label()))
+    routes_summary = _routes_row()
+    if routes_summary:
+        rows.append(("routes", routes_summary))
     try:
         pm = get_persistence()
         thread_count = len(pm.list_threads(limit=10000, tenant_id=_current_tenant()))
