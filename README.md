@@ -221,9 +221,10 @@ python -m askanswer.server        # 默认 127.0.0.1:8765
 | `/audit …` | 审计事件 |
 | `/usage …` | token / 工具用量与费用估算 |
 | `/export` / `/import` | 会话导出（md/json）/ 导入 |
+| `/edit <path>` | 用系统编辑器打开文件（`$ASKANSWER_EDITOR` / `$VISUAL` / `$EDITOR` → nano/vim…） |
 | `/exit` / `/quit` / `/q` | 退出（也可 Ctrl-D） |
 
-快捷前缀 `!<cmd>`：在 REPL 中直接执行 shell（如 `!ls -la`）；命中高风险模式时二次确认。
+快捷前缀 `!<cmd>`：在 REPL 中直接执行 shell（如 `!ls -la`）；命中高风险模式时二次确认。`!vim` / `!nano` 等全屏程序自动 TTY 直通，可直接编辑文件；也可用 `/edit <path>`。
 
 #### MCP
 

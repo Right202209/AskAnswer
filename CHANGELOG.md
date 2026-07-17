@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-07-16 · CLI interactive editors (nano / vim)
+
+### Added
+- `!vim` / `!nano` / `!nvim` 等全屏程序在 bang 模式下自动 **TTY 直通**（继承 stdin/stdout/stderr，无 30s 超时），可在 REPL 内直接编辑文件。
+- `/edit <path>`：按 `$ASKANSWER_EDITOR` → `$VISUAL` → `$EDITOR` → 本机 nano/vim/nvim/vi… 顺序拉起编辑器。
+- `tools.command_needs_tty()`：识别需要真实终端的程序；管道捕获模式下对编辑器立即返回友好错误（避免 agent shell 假死 30s）。
+
+### Changed
+- `execute_shell_command(..., tty=False)` 新增 `tty` 参数；默认行为不变（捕获输出 + 30s 超时）。
+
+### Verification
+- `pytest tests/test_shell_tty.py -q` + 相关回归。
+
 ## 2026-07-16 · settings.json configuration layers
 
 ### Added

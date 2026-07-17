@@ -1,11 +1,12 @@
 # 交互式 REPL 主循环 + ``!<cmd>`` 直执行 shell + 输入框边框。
 from __future__ import annotations
 
+import sys
 import uuid
 
 from ..load import current_model_label
 from ..mcp import get_manager as _mcp_manager
-from ..tools import check_dangerous, execute_shell_command
+from ..tools import check_dangerous, command_needs_tty, execute_shell_command
 from ..ui_input import make_session, read_line
 from .commands import handle_command
 from .render import render_error, tips_block, welcome_box
@@ -14,13 +15,17 @@ from .theme import C, _console
 
 
 def run_bang_command(command: str) -> None:
-    """`!<cmd>` 走绕过 LangGraph 的直执行路径；危险命令仍要二次确认。"""
+    """`!<cmd>` 走绕过 LangGraph 的直执行路径；危险命令仍要二次确认。
+
+    nano/vim 等全屏程序自动走 TTY 直通（继承 stdin/stdout，无超时），
+    其余命令仍捕获输出并缩进打印。
+    """
     command = command.strip()
     if not command:
         # 空命令：打印用法
         print()
         print(f"  {C.DIM}用法：{C.RESET}{C.CYAN}!<shell command>{C.RESET}  "
-              f"{C.DIM}例：!ls -la{C.RESET}")
+              f"{C.DIM}例：!ls -la · !vim file.py{C.RESET}")
         print()
         return
 
@@ -39,6 +44,24 @@ def run_bang_command(command: str) -> None:
             print(f"    {C.DIM}已取消。{C.RESET}")
             print()
             return
+
+    # 交互式编辑器/分页器等：需要真实 TTY，不能用 PIPE 捕获
+    use_tty = (
+        command_needs_tty(command)
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    )
+    if use_tty:
+        print()
+        print(f"  {C.DIM}启动交互程序（TTY 直通）…{C.RESET}")
+        print()
+        output = execute_shell_command(command, shell=True, tty=True)
+        # 只回显状态行，内容已在终端上交互完成
+        for line in output.splitlines():
+            if line.startswith("返回码：") or "失败" in line or "中断" in line:
+                print(f"  {C.DIM}{line}{C.RESET}")
+        print()
+        return
 
     # bang 模式 shell=True：保留管道、重定向等用户自己手敲的语法
     output = execute_shell_command(command, shell=True)

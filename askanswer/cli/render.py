@@ -115,6 +115,10 @@ def tips_block() -> None:
     _console.print(" [subtle]1.[/] 提出任何问题，我会进行搜索并整理答案")
     _console.print(" [subtle]2.[/] 问题越具体，结果越精准")
     _console.print(" [subtle]3.[/] 输入 [info]/help[/] 查看所有命令")
+    _console.print(
+        " [subtle]4.[/] 编辑文件：[info]!vim path[/] / "
+        "[info]!nano path[/] 或 [info]/edit path[/]"
+    )
     _console.print()
 
 
@@ -148,7 +152,8 @@ def help_block(target: str | None = None) -> None:
           f"{C.DIM}(/<Tab> 自动补全 · /help <cmd> 查看详细){C.RESET}")
     for name, desc, _usage in SLASH_COMMANDS:
         print(f"   {C.CYAN}{name:<9}{C.RESET} {desc}")
-    print(f"   {C.CYAN}!<cmd>{C.RESET}    直接执行 shell 命令 (如 !ls -la)")
+    print(f"   {C.CYAN}!<cmd>{C.RESET}    直接执行 shell 命令 "
+          f"(如 !ls -la · !vim file.py · !nano notes.md)")
     print()
     print(f" {C.DIM}快捷键：↑/↓ 历史 · Ctrl-R 反向搜索 · "
           f"Alt+Enter / Ctrl-J 换行 · Enter 提交 · "
@@ -176,6 +181,7 @@ def _help_examples(cmd: str) -> list[str]:
         "/export":  ["/export 1 --format md --out /tmp/thread.md",
                      "/export current --format json --out /tmp/thread.json"],
         "/import":  ["/import /tmp/thread.json"],
+        "/edit":    ["/edit ./README.md", "/edit ~/.askanswer/settings.json"],
     }
     return table.get(cmd, [])
 

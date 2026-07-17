@@ -57,6 +57,7 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
     ("/usage",   "查看 token/工具用量",    "/usage [--days n] [--thread id]"),
     ("/export",  "导出会话",               "/export [thread] [--format md|json] [--out path]"),
     ("/import",  "导入 JSON 会话",         "/import <path.json>"),
+    ("/edit",    "用编辑器打开文件",       "/edit <path>"),
     ("/exit",    "退出 (/quit, /q, Ctrl-D)", "/exit"),
 ]
 

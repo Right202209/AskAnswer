@@ -10,6 +10,7 @@ import uuid
 from ..render import help_block, status_block, welcome_box
 from ..theme import C
 from .audit import handle_audit_command, handle_usage_command
+from .edit import handle_edit_command
 from .mcp import handle_mcp_command
 from .model import handle_model_command
 from .threads import (
@@ -95,6 +96,8 @@ def handle_command(cmd: str, *, thread_id: str, app=None) -> tuple[bool, str]:
         new_id = handle_import_command(tail, app=app)
         if new_id:
             thread_id = new_id
+    elif head_lc == "/edit":
+        handle_edit_command(tail)
     else:
         print(
             f"\n  {C.RED}未知命令：{C.RESET}{stripped}  "
