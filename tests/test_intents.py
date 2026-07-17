@@ -103,3 +103,44 @@ def test_normalize_understanding_defaults_to_message():
 def test_get_unknown_intent_falls_back_to_search(name, fallback_name):
     handler = get_intent_registry().get(name)
     assert handler.name == fallback_name
+
+
+def test_get_normalizes_case_and_whitespace():
+    # get() 对名字做 lower().strip()，大小写/空白包裹仍命中 search
+    assert get_intent_registry().get("  SEARCH  ").name == "search"
+
+
+# ── dict 入参归一（LLM 结构化输出常是裸 dict，normalize 需吃 dict） ───────
+
+def test_normalize_clears_cross_intent_fields():
+    result = get_intent_registry().normalize(
+        {"intent": "chat", "search_query": "leftover", "file_path": "/tmp/x"},
+        "你好",
+    )
+    assert result.intent == "chat"
+    assert result.search_query == ""  # 非 search 清空
+    assert result.file_path == ""  # 非 file_read 清空
+
+
+def test_normalize_unknown_intent_coerced_to_search():
+    result = get_intent_registry().normalize({"intent": "bogus"}, "问题")
+    assert result.intent == "search"
+
+
+# ── classify_local 带 fallback 时对真实文件命中 file_read ────────────────
+
+def test_classify_local_fallback_path_detection(tmp_path):
+    f = tmp_path / "data.csv"
+    f.write_text("a,b\n1,2", encoding="utf-8")
+    result = get_intent_registry().classify_local(f"帮我看看 {f}", fallback=True)
+    assert result is not None
+    assert result.intent == "file_read"
+    assert result.file_path
+
+
+# ── tool_tags 委派到 handler.bundle_tags ─────────────────────────────────
+
+def test_tool_tags_delegate_to_handler():
+    tags = get_intent_registry().tool_tags("research")
+    assert isinstance(tags, frozenset)
+    assert "research" in tags

@@ -217,3 +217,25 @@ def test_default_db_path_honors_env(monkeypatch, tmp_path, db_env):
     target = tmp_path / "custom.db"
     monkeypatch.setenv(db_env, str(target))
     assert default_db_path() == target
+
+
+# ── 边界：迁移后的 NULL 租户隔离 & 前缀最小长度 ──────────────────────────
+
+def test_legacy_null_tenant_row_hidden_from_named_tenant(tmp_path):
+    """v2 迁移后旧行 tenant 为 NULL：无租户视图可见，具名租户视图不可见（隔离不退化）。"""
+    db = tmp_path / "legacy.db"
+    _build_v2_db(db)
+    pm = PersistenceManager(db)
+    try:
+        assert [m.thread_id for m in pm.list_threads()] == ["old-thread"]
+        assert pm.list_threads(tenant_id="alice") == []
+    finally:
+        pm.close()
+
+
+def test_find_by_prefix_requires_min_length(pm):
+    """前缀匹配需 ≥4 字符才生效，避免过短前缀命中过多线程。"""
+    pm.upsert_meta("abcd-one", title="a")
+    pm.upsert_meta("abcd-two", title="b")
+    assert len(pm.find_by_prefix("abcd")) == 2
+    assert pm.find_by_prefix("ab") == []  # <4 字符直接返回空

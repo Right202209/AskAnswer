@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from askanswer import confirmations as C
+from askanswer import tools
 
 # ── handler 分发 ─────────────────────────────────────────────────────────
 
@@ -165,3 +166,89 @@ def test_redact_list_of_dicts():
     out = C.redact_audit_args([{"password": "p"}, {"ok": "v"}])
     assert out[0]["password"] == "***"
     assert out[1]["ok"] == "v"
+
+
+# ── validate_write_path 直测（工具层闸门，与 plan 层互补） ───────────────
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "~/.ssh/id_rsa",
+        ".env",
+        "/home/user/project/.env",
+        "server.pem",
+    ],
+)
+def test_fs_write_rejects_sensitive_paths(path):
+    assert tools.validate_write_path(path, "data") is not None
+
+
+def test_fs_write_rejects_oversize(tmp_path):
+    big = "x" * (tools._WRITE_FILE_MAX_BYTES + 1)
+    assert tools.validate_write_path(str(tmp_path / "big.txt"), big) is not None
+
+
+def test_fs_write_rejects_missing_parent(tmp_path):
+    err = tools.validate_write_path(str(tmp_path / "no-such-dir" / "f.txt"), "x")
+    assert err is not None
+
+
+def test_fs_write_allows_normal_file(tmp_path):
+    assert tools.validate_write_path(str(tmp_path / "ok.txt"), "hello") is None
+
+
+def test_fs_write_apply_approval_writes(tmp_path):
+    handler = C.FsWriteConfirmation()
+    target = tmp_path / "f.txt"
+    call = {"args": {"path": str(target), "content": "data"}}
+    payload = handler.plan(call)
+    outcome = handler.apply(payload, True, call)
+    assert outcome.approved is True
+    assert target.read_text(encoding="utf-8") == "data"
+    # 审计只带 path，不带 content
+    assert "content" not in outcome.audit_args
+
+
+def test_fs_write_tool_body_never_writes(tmp_path):
+    """不变量 7：工具本体只返回提示，绝不直接落盘。"""
+    target = tmp_path / "f.txt"
+    result = tools.write_file.invoke({"path": str(target), "content": "data"})
+    assert not target.exists()
+    assert "确认" in result
+
+
+# ── 审计脱敏补充（大小写 key / 下划线复合 key / 不过度匹配） ─────────────
+
+def test_redact_masks_sensitive_keys():
+    out = C.redact_audit_args(
+        {"api_key": "sk-1", "Authorization": "Bearer x", "user_token": "t", "q": "hi"}
+    )
+    assert out["api_key"] == "***"
+    assert out["Authorization"] == "***"
+    assert out["user_token"] == "***"
+    assert out["q"] == "hi"
+
+
+def test_redact_does_not_overmatch():
+    out = C.redact_audit_args({"monkey": "safe", "count": 3})
+    assert out == {"monkey": "safe", "count": 3}
+
+
+def test_redact_scrubs_emails_and_nesting():
+    out = C.redact_audit_args(
+        {"msg": "contact bob@example.com", "nested": {"password": "p", "list": ["a@b.co", 1]}}
+    )
+    assert "bob@example.com" not in out["msg"]
+    assert out["nested"]["password"] == "***"
+    assert out["nested"]["list"] == ["***", 1]
+
+
+def test_paid_api_audit_paths_redacted():
+    handler = C.PaidApiConfirmation()
+    summary = handler.audit_args({"tool": "paid", "args": {"token": "x", "q": "hi"}})
+    assert summary["args"]["token"] == "***"
+    outcome = handler.apply(
+        {"tool": "paid", "args": {"secret": "s"}}, False, {"name": "paid", "args": {}}
+    )
+    assert outcome.approved is False
+    assert outcome.audit_args["args"]["secret"] == "***"

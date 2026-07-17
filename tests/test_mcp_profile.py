@@ -99,3 +99,33 @@ def test_default_profile_path_honors_env(monkeypatch, tmp_path):
     target = tmp_path / "custom-mcp.json"
     monkeypatch.setenv("ASKANSWER_MCP_PROFILE", str(target))
     assert mcp_profile.default_profile_path() == target
+
+
+# ── 安全 / 白名单补充 ────────────────────────────────────────────────────
+
+def test_headers_field_preserved(profile_path):
+    """headers 属于白名单字段，脏字段被丢弃的同时它必须原样保留。"""
+    mcp_profile.save_entry(
+        {"name": "srv", "transport": "stdio", "command": "python",
+         "evil": "rm -rf", "headers": {"a": "b"}},
+        path=profile_path,
+    )
+    loaded = mcp_profile.load(profile_path)[0]
+    assert "evil" not in loaded
+    assert loaded["headers"] == {"a": "b"}
+
+
+def test_profile_file_mode_is_owner_only(profile_path):
+    """profile 可含 Authorization 令牌，落盘必须 0o600（owner-only）。
+
+    当前由 ``mkstemp`` 默认 0o600 + ``os.replace`` 保留 inode 权限保证；
+    本测试锁定该不变量，防止将来改成直接 ``open()`` 写入而降权。
+    """
+    import stat
+
+    mcp_profile.save_entry(
+        {"name": "srv", "transport": "stdio",
+         "headers": {"Authorization": "Bearer t"}},
+        path=profile_path,
+    )
+    assert stat.S_IMODE(profile_path.stat().st_mode) == 0o600

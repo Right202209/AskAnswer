@@ -100,3 +100,17 @@ def test_descriptor_requires_confirmation_alias():
                              source="builtin", confirmation_class="fs_write")
     assert plain.requires_confirmation is False
     assert guarded.requires_confirmation is True
+
+
+# ── tag 过滤 miss / confirmation 值域（补充边界） ─────────────────────────
+
+def test_tag_filter_miss_returns_empty():
+    assert get_registry().list(tags={"no-such-tag-xyz"}) == []
+
+
+def test_confirmation_classes_within_known_set():
+    """每个需确认工具的 class 必须落在已知三类内，防止拼错 confirmation_class。"""
+    classes = get_registry().confirmation_classes()
+    known = {"shell", "fs_write", "external_api_paid"}
+    assert set(classes.values()) <= known
+    assert set(classes) == set(get_registry().confirmation_names())

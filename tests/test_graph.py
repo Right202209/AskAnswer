@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 from langgraph.checkpoint.memory import InMemorySaver
 
 from askanswer.graph import create_search_assistant
@@ -60,3 +63,51 @@ def test_graph_module_import_has_no_persistence_singleton():
 
     # 干净导入路径下，单例应仍为 None（本测试不调用 get_persistence）
     assert persistence._singleton is None
+
+
+# ── react 子图结构 ───────────────────────────────────────────────────────
+
+def test_react_subgraph_has_confirm_plan():
+    from askanswer.react import build_react_subgraph
+
+    nodes = set(build_react_subgraph().get_graph().nodes)
+    assert {"answer", "tools", "confirm_plan"} <= nodes
+
+
+# ── 干净子进程里的导入副作用（比同进程断言更强） ─────────────────────────
+
+def test_import_graph_has_no_persistence_side_effect(tmp_path):
+    """不变量 3：import graph 不得触发 persistence 初始化（不建 state.db）。"""
+    db = tmp_path / "side" / "state.db"
+    code = (
+        "import askanswer.graph, pathlib, sys; "
+        f"sys.exit(1 if pathlib.Path(r'{db}').exists() else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={"ASKANSWER_DB_PATH": str(db), "PATH": _path_env()},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+
+
+def test_import_helix_mcp_has_no_persistence_side_effect(tmp_path):
+    db = tmp_path / "side" / "state.db"
+    code = (
+        "import askanswer.helix_mcp, pathlib, sys; "
+        f"sys.exit(1 if pathlib.Path(r'{db}').exists() else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={"ASKANSWER_DB_PATH": str(db), "PATH": _path_env()},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+
+
+def _path_env() -> str:
+    import os
+
+    return os.environ.get("PATH", "")
