@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from .base import IntentClassification, IntentHandler, extract_file_path
-from .chat import CHAT_STARTERS, ChatHandler
-from .decision import DecisionHandler
-from .file_read import FileReadHandler
-from .helix import HelixHandler
-from .math import MathHandler
-from .research import ResearchHandler
-from .search import SearchHandler
-from .sql import SqlHandler
+from askanswer.intents.base import IntentClassification, IntentHandler, extract_file_path
+from askanswer.intents.chat import CHAT_STARTERS, ChatHandler
+from askanswer.intents.decision import DecisionHandler
+from askanswer.intents.file_read import FileReadHandler
+from askanswer.intents.helix import HelixHandler
+from askanswer.intents.math import MathHandler
+from askanswer.intents.research import ResearchHandler
+from askanswer.intents.search import SearchHandler
+from askanswer.intents.sql import SqlHandler
 
 
 class IntentRegistry:

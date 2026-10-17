@@ -1,5 +1,7 @@
 # Architecture — Extensibility (intents + tools)
 
+> 2026-10 起模块已分层（包名仍为 askanswer），主图已扁平为 7 节点。文中旧路径（如 `load.py`、`persistence.py`、`cli/`）与旧节点名的新位置见 `docs/design/ARCH_REFACTOR_STATUS.md` §3。
+
 ## Intent handlers (`askanswer/intents/`)
 
 Each intent is an `IntentHandler` (Protocol in `intents/base.py`) with: `name`, `priority` (lower wins), `bundle_tags` (frozenset of registry tags it wants the LLM to see), `max_retries`, plus four methods — `local_classify(text) → IntentClassification | None`, `prompt_hint(state) → str`, `evaluate(state) → EvaluationResult`, `cli_label(update) → str`. A handler **may optionally** implement `clarify(state, context) → ClarificationRequest | None` (the generic clarification protocol): return a request to prompt the user *before* answering when required info is missing. `file_read` (no path → free-text entry), `sql` (no `context.db_dsn` → proceed / fall back to `chat`), and `research` (short/broad `user_query` → pick a scope) implement it today; the other five don't. Dispatch is via `base.get_clarification()` (getattr + swallow errors → `None`), consumed by `clarify_node` at the react subgraph entry (see architecture-orchestration). Convention: `choices[default_index].updates` must equal "no change" so non-TTY stays non-regressive. `IntentRegistry` (singleton via `get_intent_registry()`) owns:

@@ -6,8 +6,13 @@
 
 from __future__ import annotations
 
-from ..state import SearchState
-from .base import EvaluationResult, IntentClassification, pass_result
+from askanswer.graph.state import SearchState
+from askanswer.intents.base import (
+    EvaluationResult,
+    IntentClassification,
+    ModelProvider,
+    pass_result,
+)
 
 DECISION_KEYWORDS_LOWER = (
     "decision memo",
@@ -44,7 +49,7 @@ class DecisionHandler:
     # 的模糊需求启发式（"做个X"），避免 "帮我做个选型决策" 被 Helix 抢走。
     priority = 21
     bundle_tags = frozenset({"decision", "decision_tool", "helix", "search"})
-    # 子图内部 interview + decide 已足够；父 sorcery 不再重试（Helix 同款理由）。
+    # 子图内部 interview + decide 已足够；review 节点 不再重试（Helix 同款理由）。
     max_retries = 0
 
     def local_classify(self, text: str) -> IntentClassification | None:
@@ -64,7 +69,7 @@ class DecisionHandler:
             "传入用户原始决策作为 topic，等子图返回带取舍分析的 Markdown 备忘后再回答。）"
         )
 
-    def evaluate(self, state: SearchState) -> EvaluationResult:
+    def evaluate(self, state: SearchState, models: ModelProvider | None = None) -> EvaluationResult:
         # 子图自带 interview + decide；父图不重复评估。
         return pass_result("decision subgraph self-contained")
 

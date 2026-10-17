@@ -1,6 +1,6 @@
 """从环境变量构造 ``Settings``：全项目唯一读取 ASKANSWER_* 配置变量的地方。
 
-环境变量本身已由 ``askanswer.settings.bootstrap_environ`` 按分层优先级装载
+环境变量本身已由 ``askanswer.config.layers.bootstrap_environ`` 按分层优先级装载
 （进程 env > settings.local.json > settings.json > user settings > .env）。
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from .schema import ROLE_NAMES, Limits, ModelRoles, Secrets, Settings
+from askanswer.config.schema import ROLE_NAMES, Limits, ModelRoles, Secrets, Settings
 
 _TRUTHY = {"1", "true", "yes", "on"}
 

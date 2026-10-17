@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from askanswer import telemetry
+from askanswer.observability import telemetry
 
 
 @pytest.fixture(autouse=True)

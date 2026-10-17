@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 
-from ..schema import ContextSchema
-from ..state import SearchState
-from .base import (
+from askanswer.graph.context import ContextSchema
+from askanswer.graph.state import SearchState
+from askanswer.intents.base import (
     ClarificationChoice,
     ClarificationRequest,
     EvaluationResult,
     IntentClassification,
+    ModelProvider,
     latest_tool_message,
     pass_result,
 )
@@ -69,7 +70,7 @@ class SqlHandler:
             default_index=0,
         )
 
-    def evaluate(self, state: SearchState) -> EvaluationResult:
+    def evaluate(self, state: SearchState, models: ModelProvider | None = None) -> EvaluationResult:
         tool_message = latest_tool_message(state, "sql_query")
         if tool_message is None:
             return pass_result("no sql_query result to evaluate")

@@ -10,8 +10,13 @@ from __future__ import annotations
 
 import re
 
-from ..state import SearchState
-from .base import EvaluationResult, IntentClassification, pass_result
+from askanswer.graph.state import SearchState
+from askanswer.intents.base import (
+    EvaluationResult,
+    IntentClassification,
+    ModelProvider,
+    pass_result,
+)
 
 # 中英混合的关键字。粒度刻意偏粗：只要用户语义偏「想先把规格想清楚」就命中。
 HELIX_KEYWORDS_LOWER = (
@@ -139,7 +144,7 @@ class HelixHandler:
             "传入用户原始需求作为 topic，等子图返回 Markdown 规格摘要后再回答。）"
         )
 
-    def evaluate(self, state: SearchState) -> EvaluationResult:
+    def evaluate(self, state: SearchState, models: ModelProvider | None = None) -> EvaluationResult:
         # 子图内部已经做过 evaluate 阶段；父图不重复评估。
         return pass_result("helix subgraph self-evaluates")
 

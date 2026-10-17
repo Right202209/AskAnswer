@@ -178,10 +178,8 @@ class _FakeStructured:
 def test_search_evaluate_structured_retry(monkeypatch):
     from askanswer.intents import search
 
-    monkeypatch.setattr(search, "model_for", lambda role: _FakeStructured(
-        search.SearchVerdict(decision="re_search", new_search_query="better kw")
-    ))
-    result = search.SearchHandler().evaluate(_search_state())
+    fake = _FakeStructured(search.SearchVerdict(decision="re_search", new_search_query="better kw"))
+    result = search.SearchHandler().evaluate(_search_state(), models=lambda role: fake)
     assert result.decision == "retry"
     assert result.retry_directive["slots"]["search_query"] == "better kw"
 
@@ -196,14 +194,14 @@ def test_search_evaluate_pass_and_duplicate_and_error(monkeypatch):
         search.SearchVerdict(decision="re_search", new_search_query=""),
         RuntimeError("model down"),
     ):
-        monkeypatch.setattr(search, "model_for", lambda role, v=verdict: _FakeStructured(v))
-        assert handler.evaluate(_search_state()).decision == "pass"
+        models = lambda role, v=verdict: _FakeStructured(v)  # noqa: E731
+        assert handler.evaluate(_search_state(), models=models).decision == "pass"
 
 
 # ── P4：intent 专用参数进 slots ─────────────────────────────────────────
 
 def test_state_helpers_split_generic_fields_and_slots():
-    from askanswer.state import apply_updates, get_slot, with_slots
+    from askanswer.graph.state import apply_updates, get_slot, with_slots
 
     state = {"slots": {"a": 1}}
     assert get_slot(state, "a") == 1
@@ -217,10 +215,10 @@ def test_state_helpers_split_generic_fields_and_slots():
 def test_understand_writes_slots_not_flat_fields():
     from langchain_core.messages import HumanMessage
 
-    from askanswer.nodes import make_understand_node
+    from askanswer.graph.nodes.route import make_route_node
     from askanswer.runtime import build_container
 
-    understand = make_understand_node(build_container())
+    understand = make_route_node(build_container())
     out = understand({"messages": [HumanMessage(content="读取 ./data.csv 文件")]})
     assert out["intent"] == "file_read"
     assert out["slots"]["file_path"].endswith("data.csv")
@@ -229,14 +227,14 @@ def test_understand_writes_slots_not_flat_fields():
 
 
 def test_sorcery_retry_writes_new_query_into_slots():
-    from askanswer import nodes
+    from askanswer.graph.nodes import review as nodes
     from askanswer.intents.base import EvaluationResult
     from askanswer.runtime import build_container
 
     class _H:
         max_retries = 2
 
-        def evaluate(self, state):
+        def evaluate(self, state, models=None):
             return EvaluationResult(
                 decision="retry",
                 retry_directive={"slots": {"search_query": "new"}, "instruction": "x"},
@@ -246,7 +244,7 @@ def test_sorcery_retry_writes_new_query_into_slots():
         def get(self, name):
             return _H()
 
-    sorcery = nodes.make_sorcery_node(build_container(intents=_R()))
+    sorcery = nodes.make_review_node(build_container(intents=_R()))
     out = sorcery({"intent": "search", "slots": {"search_query": "old", "k": 1}})
     assert out["step"] == "retry_search"
     assert out["slots"] == {"search_query": "new", "k": 1}

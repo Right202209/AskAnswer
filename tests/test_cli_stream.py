@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessageChunk
 
-from askanswer import runner
-from askanswer.cli import stream as cli_stream
+from askanswer.interfaces.cli import stream as cli_stream
+from askanswer.runtime import runner
 
 
 class _FakeState:
@@ -36,7 +36,7 @@ class _FakeApp:
 
 
 def _token(text: str) -> tuple[str, tuple]:
-    return ("messages", (AIMessageChunk(content=text), {"langgraph_node": "answer"}))
+    return ("messages", (AIMessageChunk(content=text), {"langgraph_node": "reason"}))
 
 
 def _tool_plan() -> tuple[str, tuple]:
@@ -60,11 +60,11 @@ def _interrupt(payload: dict) -> tuple[str, dict]:
 def test_stream_leg_emits_token_tool_node_then_final():
     app = _FakeApp(
         legs=[[
-            _node("understand", {"intent": "chat"}),
+            _node("route", {"intent": "chat"}),
             _tool_plan(),
             _token("Hello "),
             _token("world"),
-            _node("answer", {"final_answer": "Hello world"}),
+            _node("reason", {"final_answer": "Hello world"}),
         ]],
         state_values={"final_answer": "Hello world", "messages": []},
     )
@@ -100,7 +100,7 @@ def test_stream_leg_interrupt_yields_interrupt_and_no_final():
 def test_stream_leg_final_answer_falls_back_to_state():
     # 节点流未给出 final_answer 时，final 事件从 state 兜底取。
     app = _FakeApp(
-        legs=[[_node("understand", {"intent": "chat"})]],
+        legs=[[_node("route", {"intent": "chat"})]],
         state_values={"final_answer": "from state"},
     )
     events = list(runner.stream_leg(
@@ -126,17 +126,17 @@ def _neuter_accounting(monkeypatch):
         def upsert_meta(self, *a, **k):
             return None
 
-    monkeypatch.setattr(cli_stream, "get_persistence", lambda: _FakePM())
+    monkeypatch.setattr(cli_stream, "get_store", lambda: _FakePM())
 
 
 def test_stream_query_returns_streamed_answer(monkeypatch):
     _neuter_accounting(monkeypatch)
     app = _FakeApp(
         legs=[[
-            _node("understand", {"intent": "chat"}),
+            _node("route", {"intent": "chat"}),
             _token("Hello "),
             _token("world"),
-            _node("answer", {"final_answer": "Hello world"}),
+            _node("reason", {"final_answer": "Hello world"}),
         ]],
         state_values={"final_answer": "Hello world", "messages": []},
     )
@@ -159,7 +159,7 @@ def test_stream_query_prompts_confirmation_then_resumes(monkeypatch):
     app = _FakeApp(
         legs=[
             [_node("shell_plan", {"pending_shell": {"1": {}}}), _interrupt(payload)],
-            [_node("answer", {"final_answer": "done"})],
+            [_node("reason", {"final_answer": "done"})],
         ],
         state_values={"final_answer": "done", "messages": []},
     )
@@ -172,14 +172,14 @@ def test_stream_query_prompts_confirmation_then_resumes(monkeypatch):
 
 def test_stream_leg_drops_tokens_from_non_answer_nodes():
     """P12：分类/评估模型的 token 不能被当作答案流出。"""
-    from askanswer import runner
+    from askanswer.runtime import runner
 
     tracker = runner._LegTracker()
     leaked = list(runner._message_events(
-        (AIMessageChunk(content="评分：pass"), {"langgraph_node": "sorcery"}), tracker,
+        (AIMessageChunk(content="评分：pass"), {"langgraph_node": "review"}), tracker,
     ))
     assert leaked == []
     kept = list(runner._message_events(
-        (AIMessageChunk(content="hi"), {"langgraph_node": "answer"}), tracker,
+        (AIMessageChunk(content="hi"), {"langgraph_node": "reason"}), tracker,
     ))
     assert [e.text for e in kept] == ["hi"]

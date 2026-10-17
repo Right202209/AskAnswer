@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from askanswer import settings
+from askanswer.config import layers as settings
 
 
 @pytest.fixture
@@ -233,9 +233,9 @@ def test_import_does_not_touch_environ(tmp_path):
     settings.write_text(json.dumps({"env": {"ASKANSWER_PROBE_VAR": "from-settings"}}))
     code = (
         "import os, sys\n"
-        "import askanswer.load, askanswer.graph, askanswer.registry, askanswer.tools\n"
+        "import askanswer.llm.models, askanswer.graph, askanswer.tools.registry, askanswer.tools.builtin\n"
         "before = os.environ.get('ASKANSWER_PROBE_VAR')\n"
-        "askanswer.load.ensure_environ()\n"
+        "askanswer.config.ensure_environ()\n"
         "after = os.environ.get('ASKANSWER_PROBE_VAR')\n"
         "sys.exit(0 if (before is None and after == 'from-settings') else 1)\n"
     )

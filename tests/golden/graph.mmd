@@ -1,0 +1,30 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	route(route)
+	clarify(clarify)
+	reason(reason)
+	plan_approvals(plan_approvals)
+	ask_approval(ask_approval)
+	act(act)
+	review(review)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> route;
+	act --> reason;
+	ask_approval -.-> act;
+	clarify --> reason;
+	plan_approvals --> ask_approval;
+	reason -.-> act;
+	reason -.-> plan_approvals;
+	reason -.-> review;
+	review -.-> __end__;
+	review -.-> reason;
+	route --> clarify;
+	ask_approval -.-> ask_approval;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

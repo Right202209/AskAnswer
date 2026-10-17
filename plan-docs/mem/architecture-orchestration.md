@@ -52,18 +52,25 @@ The react subgraph is now `answer → confirm_plan → ask_approval ⟲ → tool
   actions used to run twice when a turn mixed them with an interrupt.
 
 
-## State, container and node factories (2026-10 batch 2, supersedes older paragraphs)
+## Current architecture (2026-10, supersedes the paragraphs above)
 
-- `SearchState` holds only generic fields: `messages`, `user_query`, `intent`, `slots`, `final_answer`,
-  `retry_count`, `step` (a `Phase` literal: understood / tool_called / completed / retry_search),
-  `retry_directive`, `pending_confirmations`. Intent-specific params (`search_query`, `file_path`, ...)
-  live in `slots`; read with `state.get_slot`, write with `state.with_slots`; clarification updates go
-  through `state.apply_updates` (intent / user_query direct, everything else → slots). Retry
-  directives carry new slot values under `retry_directive["slots"]`.
-- `askanswer/runtime/container.py` is the composition root. Every node is built by a factory —
-  `make_understand_node`, `make_sorcery_node` (nodes.py), `make_clarify_node`, `make_answer_node`,
-  `make_confirm_plan_node`, `make_ask_approval_node`, `make_tools_node`, `make_route_from_answer`.
-  `create_search_assistant(checkpointer, container=None)` / `build_react_subgraph(container)`.
-  Tests inject fakes via `build_container(tools=..., models=..., intents=..., confirmations=...)`.
-- Configuration: `askanswer/config` (typed `Settings`, `load_settings`, `current_settings`, `paths`).
-  Only `config/loader.py` reads ASKANSWER_* env vars (enforced by `tests/test_config.py`).
+Package name stays `askanswer`; modules are layered: `core/ config/ llm/ graph/ intents/ tools/ agents/ mcp/ safety/
+storage/ observability/ runtime/ interfaces/` (old→new map in `docs/design/ARCH_REFACTOR_STATUS.md` §3).
+
+- **Flat main graph** (`graph/builder.py::build_graph(container)`): `START → route → clarify → reason`;
+  `reason → review` (no tool calls) | `act` (plain tools) | `plan_approvals → ask_approval ⟲ → act`; `act → reason`;
+  `review → reason` (retry) | `END`. No react subgraph. Golden topology in `tests/golden/graph.mmd`.
+  Routing functions in `graph/edges.py`; nodes in `graph/nodes/{route,clarify,reason,approvals,act,review}.py`.
+- **State**: `SearchState` (graph/state.py) generic fields only — `messages`, `user_query`, `intent`, `slots`,
+  `final_answer`, `retry_count`, `step` (`Phase` from core/types.py), `retry_directive`, `pending_confirmations`.
+  Intent params in `slots` (`get_slot` / `with_slots` / `apply_updates`); retries carry `retry_directive["slots"]`.
+- **Composition root**: `runtime/container.py` — `build_container(tools=, intents=, models=, confirmations=,
+  settings=, store=, bus=)`; all lazy. Every node is `make_xxx_node(container)`; `review` calls
+  `run_evaluate(handler, state, container.models)`.
+- **Config**: `askanswer.config` — `Settings` (Pydantic), `current_settings()`, `ensure_environ()`; only
+  `config/loader.py` reads ASKANSWER_* env (test-guarded).
+- **Storage**: `storage/store.py::Store` facade over `Database` + `ThreadRepo` / `AuditRepo` / `LabelRepo` + SqliteSaver;
+  `get_store()` is the process default.
+- **Events**: `observability/bus.py` — `log_event` publishes `Event`; default subscribers `audit_sink` (run-scoped
+  buffer → batch insert) and `telemetry_sink` (tool events → LangSmith/OTEL).
+- **Streaming**: runner forwards LLM tokens only from node `reason`; final answer comes from `reason` / `review` updates.

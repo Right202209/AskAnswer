@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from askanswer.registry import (
+from askanswer.tools.registry import (
     ALL_INTENT_TAGS,
     ToolDescriptor,
     ToolRegistry,
@@ -121,7 +121,7 @@ def test_confirmation_classes_within_known_set():
 def test_high_risk_tool_without_confirmation_is_rejected():
     import pytest
 
-    from askanswer.registry import ToolRegistrationError
+    from askanswer.tools.registry import ToolRegistrationError
 
     for risk in ("write", "exec", "paid"):
         with pytest.raises(ToolRegistrationError):

@@ -9,15 +9,14 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import START, StateGraph
 from langgraph.types import Command
 
-from askanswer import confirmations
-from askanswer.react import build_react_subgraph
-from askanswer.registry import ToolDescriptor, ToolRegistry
+from askanswer.graph import create_search_assistant
+from askanswer.graph.context import ContextSchema
+from askanswer.intents.base import IntentClassification
 from askanswer.runtime import build_container
-from askanswer.schema import ContextSchema
-from askanswer.state import SearchState
+from askanswer.safety import approvals as confirmations
+from askanswer.tools.registry import ToolDescriptor, ToolRegistry
 
 CALLS: dict[str, int] = {}
 
@@ -70,6 +69,13 @@ class _ScriptedModel:
     def bind_tools(self, tools):
         return self
 
+    def with_structured_output(self, schema):
+        class _Classifier:  # route 的分类调用：固定判为 chat
+            def invoke(self, messages):
+                return IntentClassification(intent="chat", understanding="do it")
+
+        return _Classifier()
+
     def invoke(self, messages):
         self.turn += 1
         if self.turn == 1:
@@ -96,21 +102,13 @@ def _setup(monkeypatch, tool_calls):
         confirmations=lambda clazz: handler if clazz == "fake_confirm" else None,
     )
 
-    builder = StateGraph(SearchState, context_schema=ContextSchema)
-    builder.add_node("answer", build_react_subgraph(container))
-    builder.add_edge(START, "answer")
-    app = builder.compile(checkpointer=InMemorySaver())
-    return app
+    # 扁平主图（D1）：interrupt 直接发生在主图的 ask_approval 节点
+    return create_search_assistant(InMemorySaver(), container=container)
 
 
 def _start(app, thread):
     cfg = {"configurable": {"thread_id": thread}}
-    state = {
-        "messages": [HumanMessage(content="do it")],
-        "intent": "chat",
-        "step": "tool_called_init",
-        "user_query": "do it",
-    }
+    state = {"messages": [HumanMessage(content="do it")]}
     app.invoke(state, config=cfg, context=ContextSchema())
     return cfg
 

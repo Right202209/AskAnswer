@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from ..schema import ContextSchema
-from ..state import SLOT_FILE_PATH, SearchState, get_slot
-from .base import (
+from askanswer.graph.context import ContextSchema
+from askanswer.graph.state import SLOT_FILE_PATH, SearchState, get_slot
+from askanswer.intents.base import (
     ClarificationChoice,
     ClarificationRequest,
     EvaluationResult,
     IntentClassification,
+    ModelProvider,
     extract_file_path,
     latest_tool_message,
     pass_result,
@@ -72,7 +73,7 @@ class FileReadHandler:
             free_text_prompt="文件路径：",
         )
 
-    def evaluate(self, state: SearchState) -> EvaluationResult:
+    def evaluate(self, state: SearchState, models: ModelProvider | None = None) -> EvaluationResult:
         tool_message = latest_tool_message(state, "read_file")
         if tool_message is None:
             return pass_result("no read_file result to evaluate")

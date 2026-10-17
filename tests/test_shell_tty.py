@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from askanswer.cli.commands.edit import resolve_editor
-from askanswer.tools import command_needs_tty, execute_shell_command
+from askanswer.interfaces.cli.commands.edit import resolve_editor
+from askanswer.tools.builtin import command_needs_tty, execute_shell_command
 
 # ── command_needs_tty ──────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ def test_execute_tty_mode_inherits_stdio():
     fake = MagicMock()
     fake.returncode = 0
     fake.wait.return_value = 0
-    with patch("askanswer.tools.subprocess.Popen", return_value=fake) as popen:
+    with patch("askanswer.tools.builtin.subprocess.Popen", return_value=fake) as popen:
         out = execute_shell_command("vim foo.py", shell=True, tty=True)
     popen.assert_called_once()
     kwargs = popen.call_args.kwargs
@@ -83,12 +83,12 @@ def test_resolve_editor_falls_back_to_path(monkeypatch):
     def _which(name: str):
         return f"/usr/bin/{name}" if name == "vim" else None
 
-    with patch("askanswer.cli.commands.edit.shutil.which", side_effect=_which):
+    with patch("askanswer.interfaces.cli.commands.edit.shutil.which", side_effect=_which):
         assert resolve_editor() == ["vim"]
 
 
 def test_resolve_editor_none_when_missing(monkeypatch):
     for key in ("ASKANSWER_EDITOR", "VISUAL", "EDITOR"):
         monkeypatch.delenv(key, raising=False)
-    with patch("askanswer.cli.commands.edit.shutil.which", return_value=None):
+    with patch("askanswer.interfaces.cli.commands.edit.shutil.which", return_value=None):
         assert resolve_editor() is None

@@ -72,7 +72,7 @@ def test_paths_follow_one_convention(tmp_path):
 def test_no_module_reads_askanswer_env_directly():
     """除 config/loader.py 与 settings.py（分层装载）外，业务代码不直接读配置变量。"""
     root = Path(__file__).resolve().parents[1] / "askanswer"
-    allowed = {root / "config" / "loader.py", root / "settings.py"}
+    allowed = {root / "config" / "loader.py", root / "config" / "layers.py"}
     offenders = []
     for path in root.rglob("*.py"):
         if path in allowed:

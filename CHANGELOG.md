@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-17 · Architecture refactor batch 3–4（P11 / P14 / D1 / 事件总线，包名保持 askanswer）
+
+### Changed
+- **P14 分层目录**：包内按 `core / config / llm / graph / intents / tools / agents / mcp / safety / storage / observability / runtime / interfaces` 组织；纯移动 + 导入改写，迁移对照见 `docs/design/ARCH_REFACTOR_STATUS.md` §3。入口脚本改为 `askanswer.interfaces.cli:main` / `askanswer.interfaces.http.server:main`，`python -m askanswer` 不变。
+- **P11 存储拆分**：`storage/db.py`（连接 + 迁移）、`storage/repos/{threads,audit,labels}.py`、`storage/store.py`（`Store` 门面，`get_store()`）。
+- **事件总线**：`observability/bus.py`；`log_event` 只发布事件，审计缓冲落库与 LangSmith/OTEL 转发都是订阅者。
+- **D1 扁平主图**：`route → clarify → reason → {act | plan_approvals → ask_approval⟲ → act} → reason … → review → (reason | END)`；删除 react 子图；新增 golden Mermaid 测试。
+- intent 的 `evaluate(state, models=None)` 接收组装根注入的模型提供者（旧签名插件仍可用）。
+- `Phase` / `Risk` / capability 常量移入 `core/types.py`；`ensure_environ` 移入 `askanswer.config`。
+
+### Breaking
+- 模块路径变化（无兼容别名）：`askanswer.graph.create_search_assistant` 不变；其余见迁移对照表。
+- 节点名变化：`understand→route`、`answer→reason`、`tools→act`、`confirm_plan→plan_approvals`、`sorcery→review`。旧会话的 checkpoint 若停在旧节点名的 interrupt 上，需重新提问。
+
+
 ## 2026-10-17 · Architecture refactor batch 2（P2 / P3 / P4，包名保持 askanswer）
 
 ### Changed

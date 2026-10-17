@@ -7,9 +7,15 @@ from typing import Literal
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
-from ..routing import ROLE_EVALUATE, model_for
-from ..state import SLOT_SEARCH_QUERY, SearchState, get_slot
-from .base import EvaluationResult, IntentClassification, latest_tool_message, pass_result
+from askanswer.graph.state import SLOT_SEARCH_QUERY, SearchState, get_slot
+from askanswer.intents.base import (
+    EvaluationResult,
+    IntentClassification,
+    ModelProvider,
+    latest_tool_message,
+    pass_result,
+)
+from askanswer.llm.routing import ROLE_EVALUATE, model_for
 
 
 class SearchVerdict(BaseModel):
@@ -81,7 +87,7 @@ class SearchHandler:
             return f"（如需联网信息请调用 tavily_search 工具，建议关键词：{query}；否则基于已有知识回答。）"
         return "（如需联网信息请调用 tavily_search 工具，否则基于已有知识回答。）"
 
-    def evaluate(self, state: SearchState) -> EvaluationResult:
+    def evaluate(self, state: SearchState, models: ModelProvider | None = None) -> EvaluationResult:
         final_answer = state.get("final_answer", "")
         tool_message = latest_tool_message(state, "tavily_search")
         search_results = ""
@@ -98,7 +104,7 @@ class SearchHandler:
         # 结构化输出代替在文本里找“评分：xxx”（架构文档 P7）：模型换个说法不会让判断失效
         try:
             verdict = (
-                model_for(ROLE_EVALUATE)
+                (models or model_for)(ROLE_EVALUATE)
                 .with_structured_output(SearchVerdict)
                 .invoke([SystemMessage(content=prompt)])
             )

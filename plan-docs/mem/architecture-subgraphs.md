@@ -1,5 +1,7 @@
 # Architecture — Subgraphs as tools
 
+> 2026-10 起模块已分层（包名仍为 askanswer），主图已扁平为 7 节点。文中旧路径（如 `load.py`、`persistence.py`、`cli/`）与旧节点名的新位置见 `docs/design/ARCH_REFACTOR_STATUS.md` §3。
+
 ## SQL agent (`askanswer/sqlagent/`)
 
 The SQL flow is **exposed as a tool**, not as a parent-graph node. `sql_tool.sql_query` is the registry entry (tags: `chat | sql | sql_tool`); when invoked, it calls `sql_agent.run_sql_agent` which executes a separate `StateGraph(SqlAgentState, context_schema=ContextSchema)` from `build_sql_agent()`. Internal flow: `list_tables → call_get_schema → get_schema → generate_query → (check_query → run_query → generate_query)*`. Hard caps: `MAX_SQL_QUERY_CALLS = 2`, `SQL_RECURSION_LIMIT = 12` — when exceeded, routes to `limit_exceeded` which returns the latest tool output rather than 502'ing.

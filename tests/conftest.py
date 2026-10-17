@@ -24,9 +24,9 @@ def _isolated_env(monkeypatch):
 
 @pytest.fixture
 def pm(tmp_path):
-    """临时库上的 PersistenceManager；用完关闭连接，避免 Windows/WAL 句柄残留。"""
-    from askanswer.persistence import PersistenceManager
+    """临时库上的 Store；用完关闭连接，避免 Windows/WAL 句柄残留。"""
+    from askanswer.storage.store import Store
 
-    manager = PersistenceManager(tmp_path / "state.db")
+    manager = Store(tmp_path / "state.db")
     yield manager
     manager.close()

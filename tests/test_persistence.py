@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from askanswer.persistence import PersistenceManager
+from askanswer.storage.store import Store
 
 
 def _schema_version(conn: sqlite3.Connection) -> int:
@@ -33,13 +33,13 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 # ── 空库建到 v4 ─────────────────────────────────────────────────────────
 
 def test_fresh_db_is_v4(pm):
-    assert _schema_version(pm._conn) == 4
+    assert _schema_version(pm.db.conn) == 4
 
 
 def test_fresh_db_has_tenant_columns_and_label_table(pm):
-    assert "tenant_id" in _columns(pm._conn, "thread_meta")
-    assert "tenant_id" in _columns(pm._conn, "audit_event")
-    assert _table_exists(pm._conn, "checkpoint_label")
+    assert "tenant_id" in _columns(pm.db.conn, "thread_meta")
+    assert "tenant_id" in _columns(pm.db.conn, "audit_event")
+    assert _table_exists(pm.db.conn, "checkpoint_label")
 
 
 # ── v2 旧库 → v4 迁移无损 ────────────────────────────────────────────────
@@ -77,11 +77,11 @@ def _build_v2_db(path) -> None:
 def test_v2_upgrades_to_v4(tmp_path):
     db = tmp_path / "legacy.db"
     _build_v2_db(db)
-    pm = PersistenceManager(db)
+    pm = Store(db)
     try:
-        assert _schema_version(pm._conn) == 4
-        assert "tenant_id" in _columns(pm._conn, "thread_meta")
-        assert _table_exists(pm._conn, "checkpoint_label")
+        assert _schema_version(pm.db.conn) == 4
+        assert "tenant_id" in _columns(pm.db.conn, "thread_meta")
+        assert _table_exists(pm.db.conn, "checkpoint_label")
     finally:
         pm.close()
 
@@ -89,7 +89,7 @@ def test_v2_upgrades_to_v4(tmp_path):
 def test_v2_data_survives_migration(tmp_path):
     db = tmp_path / "legacy.db"
     _build_v2_db(db)
-    pm = PersistenceManager(db)
+    pm = Store(db)
     try:
         meta = pm.get_meta("old-thread")
         assert meta is not None
@@ -212,7 +212,7 @@ def test_checkpoint_label_rejects_empty(pm):
 
 @pytest.mark.parametrize("db_env", ["ASKANSWER_DB_PATH"])
 def test_default_db_path_honors_env(monkeypatch, tmp_path, db_env):
-    from askanswer.persistence import default_db_path
+    from askanswer.storage.store import default_db_path
 
     target = tmp_path / "custom.db"
     monkeypatch.setenv(db_env, str(target))
@@ -225,7 +225,7 @@ def test_legacy_null_tenant_row_hidden_from_named_tenant(tmp_path):
     """v2 迁移后旧行 tenant 为 NULL：无租户视图可见，具名租户视图不可见（隔离不退化）。"""
     db = tmp_path / "legacy.db"
     _build_v2_db(db)
-    pm = PersistenceManager(db)
+    pm = Store(db)
     try:
         assert [m.thread_id for m in pm.list_threads()] == ["old-thread"]
         assert pm.list_threads(tenant_id="alice") == []
@@ -260,3 +260,22 @@ def test_delete_thread_removes_checkpoints_via_saver_api(pm):
     assert pm.delete_thread("t-del") is True
     assert list(pm.checkpointer.list(cfg)) == []
     assert pm.get_meta("t-del") is None
+
+
+def test_repos_share_one_database(tmp_path):
+    """P11：Store 是门面，repos 各管一张表并共享同一 Database。"""
+    from askanswer.storage.store import Store
+
+    store = Store(tmp_path / "s.db")
+    try:
+        assert store.threads._db is store.db is store.audit._db is store.labels._db
+        store.threads.upsert_meta("t1", preview="hello", tenant_id="a")
+        store.audit.log_audit_event("t1", kind="tool_call", tool_name="pwd", tenant_id="a")
+        store.labels.set_checkpoint_label("t1", "cp1", "start")
+        assert store.delete_thread("t1", tenant_id="b") is False  # 越租户
+        assert store.delete_thread("t1", tenant_id="a") is True
+        assert store.get_meta("t1") is None
+        assert store.list_audit_events(thread_id="t1") == []
+        assert store.list_checkpoint_labels("t1") == []
+    finally:
+        store.close()

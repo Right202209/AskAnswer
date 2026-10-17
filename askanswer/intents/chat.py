@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from ..state import SearchState
-from .base import EvaluationResult, IntentClassification, pass_result
+from askanswer.graph.state import SearchState
+from askanswer.intents.base import (
+    EvaluationResult,
+    IntentClassification,
+    ModelProvider,
+    pass_result,
+)
 
 CHAT_STARTERS = (
     "你好",
@@ -42,7 +47,7 @@ class ChatHandler:
     def prompt_hint(self, state: SearchState) -> str:
         return "（这是闲聊或常识类问题，不需要搜索结果；可直接回答或调用合适的工具。）"
 
-    def evaluate(self, state: SearchState) -> EvaluationResult:
+    def evaluate(self, state: SearchState, models: ModelProvider | None = None) -> EvaluationResult:
         return pass_result("chat does not need post-answer evaluation")
 
     def cli_label(self, update: dict) -> str:

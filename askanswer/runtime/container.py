@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..config import Settings, current_settings
+from askanswer.config import Settings, current_settings
 
 
 def _constant(value: Any) -> Callable[[], Any]:
@@ -30,6 +30,8 @@ class Container:
     models: Callable[[str], Any]                 # role -> chat model（经路由与回退）
     confirmations: Callable[[str | None], Any]   # 确认类 -> handler | None
     settings_provider: Callable[[], Settings] = field(default=current_settings)
+    store_provider: Callable[[], Any] = field(default=lambda: _default_store())
+    bus: Any = field(default=None)               # EventBus；None 时用进程默认总线
 
     @property
     def tools(self):
@@ -40,31 +42,48 @@ class Container:
         return self.intents_provider()
 
     @property
+    def store(self):
+        """存储门面（首次访问才打开 SQLite）。"""
+        return self.store_provider()
+
+    @property
+    def events(self):
+        from askanswer.observability.bus import get_bus
+
+        return self.bus if self.bus is not None else get_bus()
+
+    @property
     def settings(self) -> Settings:
         """读取当前配置；默认每次取最新值（/model、settings 热改即时生效）。"""
         return self.settings_provider()
 
 
+def _default_store():
+    from askanswer.storage.store import get_store
+
+    return get_store()
+
+
 def _default_tools():
-    from ..registry import get_registry
+    from askanswer.tools.registry import get_registry
 
     return get_registry()
 
 
 def _default_intents():
-    from ..intents import get_intent_registry
+    from askanswer.intents import get_intent_registry
 
     return get_intent_registry()
 
 
 def _default_models(role: str):
-    from ..routing import model_for
+    from askanswer.llm.routing import model_for
 
     return model_for(role)
 
 
 def _default_confirmations(clazz: str | None):
-    from ..confirmations import get_confirmation_handler
+    from askanswer.safety.approvals import get_confirmation_handler
 
     return get_confirmation_handler(clazz)
 
@@ -76,6 +95,8 @@ def build_container(
     intents: Any = None,
     models: Callable[[str], Any] | None = None,
     confirmations: Callable[[str | None], Any] | None = None,
+    store: Any = None,
+    bus: Any = None,
 ) -> Container:
     """组装一个 Container；未给出的依赖使用进程默认实现（延迟 import，导入无副作用）。"""
     return Container(
@@ -84,4 +105,6 @@ def build_container(
         models=models or _default_models,
         confirmations=confirmations or _default_confirmations,
         settings_provider=_constant(settings) if settings is not None else current_settings,
+        store_provider=_constant(store) if store is not None else _default_store,
+        bus=bus,
     )

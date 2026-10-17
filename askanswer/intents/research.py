@@ -7,13 +7,14 @@
 
 from __future__ import annotations
 
-from ..schema import ContextSchema
-from ..state import SearchState
-from .base import (
+from askanswer.graph.context import ContextSchema
+from askanswer.graph.state import SearchState
+from askanswer.intents.base import (
     ClarificationChoice,
     ClarificationRequest,
     EvaluationResult,
     IntentClassification,
+    ModelProvider,
     pass_result,
 )
 
@@ -107,7 +108,7 @@ class ResearchHandler:
             default_index=0,
         )
 
-    def evaluate(self, state: SearchState) -> EvaluationResult:
+    def evaluate(self, state: SearchState, models: ModelProvider | None = None) -> EvaluationResult:
         # 子图内部已交叉核验；父图仅在完全没产出简报时才可能重试。
         return pass_result("research subgraph self-checks sources")
 

@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from askanswer import mcp_profile
+from askanswer.mcp import profile as mcp_profile
 
 
 @pytest.fixture

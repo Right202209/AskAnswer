@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from askanswer import confirmations as C
-from askanswer import tools
+from askanswer.safety import approvals as C
+from askanswer.tools import builtin as tools
 
 # ── handler 分发 ─────────────────────────────────────────────────────────
 
@@ -257,8 +257,8 @@ def test_paid_api_audit_paths_redacted():
 # ── P8：确认规划不调用 LLM，命令直接取自 tool_call 参数 ─────────────────
 
 def test_shell_plan_uses_command_arg_without_llm(monkeypatch):
-    from askanswer import routing
-    from askanswer.confirmations import ShellConfirmation
+    from askanswer.llm import routing
+    from askanswer.safety.approvals import ShellConfirmation
 
     def _boom(*a, **k):
         raise AssertionError("plan 不应调用模型")
@@ -271,7 +271,7 @@ def test_shell_plan_uses_command_arg_without_llm(monkeypatch):
 
 
 def test_shell_plan_without_command_is_gated():
-    from askanswer.confirmations import ShellConfirmation
+    from askanswer.safety.approvals import ShellConfirmation
 
     handler = ShellConfirmation()
     payload = handler.plan({"args": {"instruction": "删点东西"}})
@@ -280,7 +280,7 @@ def test_shell_plan_without_command_is_gated():
 
 
 def test_read_file_returns_content_without_llm(tmp_path):
-    from askanswer.tools import read_file
+    from askanswer.tools.builtin import read_file
 
     f = tmp_path / "a.txt"
     f.write_text("hello world", encoding="utf-8")

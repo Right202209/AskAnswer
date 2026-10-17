@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from langchain_core.messages import ToolMessage
 from pydantic import BaseModel, Field, model_validator
 
-from ..state import SearchState
+from askanswer.graph.state import SearchState
 
 Decision = Literal["pass", "retry"]
 
@@ -46,6 +46,10 @@ class ClarificationRequest:
     free_text_prompt: str = "请输入："
 
 
+# 按角色取模型的函数（由 runtime.Container 注入）：role -> chat model
+ModelProvider = Callable[[str], Any]
+
+
 class IntentClassification(BaseModel):
     intent: str = Field(default="search")
     file_path: str = ""
@@ -77,7 +81,11 @@ class IntentHandler(Protocol):
 
     def prompt_hint(self, state: SearchState) -> str: ...
 
-    def evaluate(self, state: SearchState) -> EvaluationResult: ...
+    def evaluate(
+        self, state: SearchState, models: ModelProvider | None = None
+    ) -> EvaluationResult:
+        """评估答案质量。需要 LLM 时用注入的 ``models(role)``（来自 Container）。"""
+        ...
 
     def cli_label(self, update: dict) -> str: ...
 
@@ -152,3 +160,20 @@ def get_clarification(
         return clarify(state, context)
     except Exception:
         return None
+
+
+def run_evaluate(handler, state: SearchState, models: ModelProvider | None) -> EvaluationResult:
+    """调用 handler.evaluate，注入模型提供者。
+
+    第三方插件 intent 可能仍是旧签名 ``evaluate(self, state)``：按签名决定是否传
+    ``models``，避免插件因新增参数而崩溃。
+    """
+    import inspect
+
+    try:
+        accepts = "models" in inspect.signature(handler.evaluate).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        return handler.evaluate(state, models=models)
+    return handler.evaluate(state)

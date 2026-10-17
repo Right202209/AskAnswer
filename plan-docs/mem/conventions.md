@@ -1,5 +1,7 @@
 # Conventions
 
+> 2026-10 起模块已分层（包名仍为 askanswer），主图已扁平为 7 节点。文中旧路径（如 `load.py`、`persistence.py`、`cli/`）与旧节点名的新位置见 `docs/design/ARCH_REFACTOR_STATUS.md` §3。
+
 - Nodes return partial state dicts that the reducers merge — never mutate `state` in place. When sorcery decides to retry, write the structured `retry_directive` (dict); when answer consumes it, return `retry_directive: {}` to clear.
 - Module-level side effects are forbidden in `schema.py` (no stub graphs); keep it pure data. `persistence.py` must stay lazy — don't import it from `graph.py` at module top.
 - New tools should be registered through `registry.py` with the right tag set, not bound directly to the model. Anything needing user approval must set `confirmation_class="shell" | "fs_write"` (more classes go in `_KNOWN_CONFIRM_CLASSES` + a matching `_run_*_with_confirmation`) — not the legacy `requires_confirmation=True` (which is now a read-only compatibility property).

@@ -14,7 +14,7 @@ pip install -e ".[dev]"     # + pytest / ruff
 
 ## 配置
 
-配置由入口（CLI / HTTP / MCP server）调用 `load.ensure_environ()` 装载，导入任何模块都不会改写环境变量。支持 **settings.json**（推荐）与 **`.env`**（保底）并存；分层结果落成环境变量后，只在 `askanswer/config/loader.py` 解析成类型化的 `Settings`，业务代码只读 `Settings`。
+配置由入口（CLI / HTTP / MCP server）调用 `askanswer.config.ensure_environ()` 装载，导入任何模块都不会改写环境变量。支持 **settings.json**（推荐）与 **`.env`**（保底）并存；分层结果落成环境变量后，只在 `askanswer/config/loader.py` 解析成类型化的 `Settings`，业务代码只读 `Settings`。
 
 ### 优先级（高 → 低）
 
@@ -137,7 +137,7 @@ ASKANSWER_CONTEXT_DIGEST=brief
 ASKANSWER_RUN_TOKEN_BUDGET=60000
 ```
 
-- 回退写 `model_fallback` 审计事件；token 归因到**真正执行**的模型；`/status` 显示非默认路由，`/usage` 按标签分账（价格表见 `askanswer/pricing.py`）。
+- 回退写 `model_fallback` 审计事件；token 归因到**真正执行**的模型；`/status` 显示非默认路由，`/usage` 按标签分账（价格表见 `askanswer/llm/pricing.py`）。
 - system prompt 按「稳定前缀 → 动态尾部」排序以命中 prompt cache；answer 指向 `anthropic:*` 时自动加 `cache_control`。
 - 离线评测：`python evals/run_intent_eval.py`（见 `evals/README.md`）；设计说明：`docs/important-documentation-d1-routing-context-cost-eval.md`。
 
@@ -184,7 +184,7 @@ askanswer --graph docs/graph.mmd  # 写入文件（不创建 SQLite）
 与 CLI 共用同一图、checkpointer 与 `runner` 事件流（零额外依赖，stdlib only）：
 
 ```bash
-python -m askanswer.server        # 默认 127.0.0.1:8765
+python -m askanswer.interfaces.http.server        # 默认 127.0.0.1:8765
 # 或 reinstall 后：askanswer-server
 ```
 
@@ -248,15 +248,15 @@ python -m askanswer.server        # 默认 127.0.0.1:8765
 - **seed** → **execute** → **evaluate**（覆盖率 + 0–1 对齐分 + gaps）
 - rejected 时最多 `MAX_GENERATIONS=3` 代回到 seed 修补
 
-返回 Markdown：`## Goal / Constraints / Acceptance criteria / Artifact / Evaluation / Lineage`。也可单独当 MCP 服务：`python -m askanswer.helix_mcp`。设计见 `docs/helix-subgraph-plan.md`。
+返回 Markdown：`## Goal / Constraints / Acceptance criteria / Artifact / Evaluation / Lineage`。也可单独当 MCP 服务：`python -m askanswer.interfaces.mcp_server.helix_server`。设计见 `docs/helix-subgraph-plan.md`。
 
 ### 澄清协议（C2）
 
-react 子图入口有 `clarify` 节点：意图 handler 可在首轮回答前 `interrupt` 一次（路径缺失、无 DSN、调研话题过短等）。CLI 用箭头菜单 + 可选自由文本；非 TTY 取默认「不改动」选项，行为非回归。
+主图的 `clarify` 节点：意图 handler 可在首轮回答前 `interrupt` 一次（路径缺失、无 DSN、调研话题过短等）。CLI 用箭头菜单 + 可选自由文本；非 TTY 取默认「不改动」选项，行为非回归。
 
 ### HITL 确认
 
-三类确认共用 `confirmations.py` 四步协议（plan → gate → interrupt → apply）：
+三类确认共用 `safety/approvals.py` 四步协议（plan → gate → interrupt → apply）：
 
 | 类 | 典型工具 | CLI 提示 |
 | --- | --- | --- |
@@ -266,46 +266,47 @@ react 子图入口有 `clarify` 节点：意图 handler 可在首轮回答前 `i
 
 ## 结构
 
+包名仍为 `askanswer`，内部按层组织（依赖方向：interfaces → runtime → graph → intents/tools/agents → llm/storage/observability → config/core）：
+
 ```
 askanswer/
-├── cli/                 # REPL 包：app / stream / repl / confirm / render / commands/*
-├── graph.py             # 父图：understand → answer(react) → sorcery
-├── react.py             # react 子图拓扑（clarify → answer ⇄ tools / confirm_plan）
-├── _react_internals.py  # tools / confirm_plan / ask_approval 节点实现
-├── clarify.py           # 意图澄清 interrupt
-├── confirmations.py     # HITL 确认协议（shell / fs_write / external_api_paid）
-├── nodes.py             # 父图节点：意图识别、自评回写
-├── state.py / schema.py # SearchState（通用字段 + slots + Phase）+ ContextSchema
-├── config/              # Settings（Pydantic）/ loader（唯一读 env 处）/ paths
-├── runtime/container.py # 组装根：节点由 make_xxx_node(container) 生成
-├── tools.py / registry.py
-├── runner.py / wire.py / server.py   # UI-free 事件流 + HTTP/SSE
-├── persistence.py / timetravel.py / audit.py / pricing.py
-├── mcp.py / mcp_profile.py / helix_mcp.py
-├── telemetry/           # LangSmith + OTEL（env 门控）
-├── intents/             # chat / search / file_read / sql / math / helix / research / decision
-├── sqlagent/ / helix/ / research/ / decision/   # 子图 → 注册为工具
-├── load.py              # 模型代理（/model 热切换）、Tavily、配置 bootstrap
-├── settings.py          # settings.json 分层 + .env 保底（bootstrap_environ）
-└── ui_input.py / ui_select.py / ui_spinner.py
+├── core/types.py            # Phase / Risk / capability 等纯领域类型
+├── config/                  # Settings（Pydantic）/ loader（唯一读 env 处）/ layers（settings.json 分层 + ensure_environ）/ paths
+├── llm/                     # models（/model 热切换代理）/ routing（按角色路由 + 回退）/ context（历史预算）/ pricing
+├── graph/                   # 主图：state / context(ContextSchema) / edges / builder
+│   └── nodes/               # route / clarify / reason / approvals(plan+ask) / act / review
+├── intents/                 # chat / search / file_read / sql / math / helix / research / decision
+├── tools/                   # registry（risk / capability / 审批声明校验）/ builtin（内置工具）
+├── agents/                  # sql / helix / research / decision 子图 → 注册为工具
+├── mcp/                     # manager（多 server 生命周期 + 工具包装）/ profile（mcp.json）
+├── safety/approvals.py      # 审批协议（shell / fs_write / external_api_paid）
+├── storage/                 # db（连接 + 迁移）/ models / repos/{threads,audit,labels} / store（门面）
+├── observability/           # bus（事件总线）/ audit（审计订阅者）/ telemetry（LangSmith + OTEL）
+├── runtime/                 # container（组装根）/ runner（UI 无关事件流）/ timetravel
+└── interfaces/
+    ├── cli/                 # REPL：app / stream / repl / confirm / render / input / select / spinner / commands/*
+    ├── http/                # server + wire（HTTP/SSE）
+    └── mcp_server/          # helix_server（Helix 作为独立 MCP 服务）
 ```
 
 
 ## 工作流
 
-```
-START → understand → answer(react) → sorcery → {answer 重跑 | END}
+主图是单层扁平的 7 个节点（不再有父图 + react 子图）：
 
-react 子图:
-  START → clarify → answer ⇄ tools
-                      └→ confirm_plan → ask_approval ⟲ → tools
+```
+START → route → clarify → reason ─┬─(无工具调用)──→ review ─┬→ END
+                                  ├─(普通工具)──→ act → reason   └→ reason（重试）
+                                  └─(需审批)──→ plan_approvals → ask_approval ⟲ → act
 ```
 
-- **understand**：本地分类器优先（关键词/正则，handler 按 priority），歧义时才调 LLM；提取路径或搜索词
-- **clarify**：仅首轮（`step == "understood"`）；handler 可选提问，默认无开销透传
-- **answer**：按 `intent` 选系统提示与工具集（`registry.list(tags=…)`）；每轮 `_reclassify_intent` 支持中途换话题
-- **confirm_plan → ask_approval → tools**：需确认的调用先 `plan` 写入 `pending_confirmations`；`ask_approval` 每次只 `interrupt()` 询问一项并把决定写回 state（无副作用，可安全重跑）；全部决定后 `tools` 一次性执行普通工具与已批准的动作（不 interrupt，`apply` 内二次校验）。恢复时不会重复执行任何工具
-- **sorcery**：委托 `handler.evaluate`；重试预算按意图（search=2，sql/file_read=1，chat/math/helix/research/decision=0）
+- **route**：本地分类器优先（关键词/正则，handler 按 priority），歧义时才调 classify 角色模型；intent 专用参数写进 `slots`
+- **clarify**：handler 可选提问一次（interrupt），默认无开销透传
+- **reason**：按 `intent` 选系统提示与工具集（`registry.list(tags=…)`）；每轮重判意图支持中途换话题
+- **plan_approvals → ask_approval → act**：需审批的调用先规划写入 `pending_confirmations`；`ask_approval` 每次只 `interrupt()` 询问一项并把决定写回 state（无副作用，可安全重跑）；全部决定后 `act` 一次性执行普通工具与已批准的动作（不 interrupt，`apply` 内二次校验）。恢复时不会重复执行任何工具
+- **review**：委托 `handler.evaluate`（模型由组装根注入）+ 本轮 token 预算闸门；重试预算按意图（search=2，sql/file_read=1，其余 0）
+
+所有节点都由 `make_xxx_node(container)` 生成；`create_search_assistant(checkpointer, container=build_container(...))` 可注入替身做测试。拓扑变更需同步 `tests/golden/graph.mmd`。
 
 ## 意图与工具
 

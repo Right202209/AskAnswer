@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from askanswer import ui_select
+from askanswer.interfaces.cli import select as ui_select
 
 
 def _feed_fd(data: bytes) -> int:

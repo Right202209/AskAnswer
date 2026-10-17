@@ -1,5 +1,7 @@
 # Commands & Required env
 
+> 2026-10 起模块已分层（包名仍为 askanswer），主图已扁平为 7 节点。文中旧路径（如 `load.py`、`persistence.py`、`cli/`）与旧节点名的新位置见 `docs/design/ARCH_REFACTOR_STATUS.md` §3。
+
 ## Python environment
 
 **Always activate the project venv before running `python` / `pip` / `askanswer`.** The venv lives at `.venv/` at the repo root. From the repo root:

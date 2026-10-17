@@ -5,7 +5,7 @@ from __future__ import annotations
 from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.utils import get_cwidth
 
-from askanswer.ui_input import (
+from askanswer.interfaces.cli.input import (
     _build_bottom_toolbar,
     _prompt_continuation,
     _prompt_message,

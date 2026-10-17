@@ -7,10 +7,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from askanswer.config import load_settings
 from askanswer.graph import create_search_assistant
+from askanswer.graph.context import ContextSchema
 from askanswer.intents.base import IntentClassification
-from askanswer.registry import ToolRegistry
 from askanswer.runtime import build_container
-from askanswer.schema import ContextSchema
+from askanswer.tools.registry import ToolRegistry
 
 
 class _FakeModel:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .schema import Settings
+from askanswer.config.schema import Settings
 
 _DIR_NAME = "askanswer"
 _HOME_DIR_NAME = ".askanswer"

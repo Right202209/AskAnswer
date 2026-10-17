@@ -98,8 +98,8 @@ def aggregate(rows: list[dict]) -> dict:
 
 
 def _role_primary_label(role: str) -> str:
-    from askanswer.load import current_model_label
-    from askanswer.routing import get_router
+    from askanswer.llm.models import current_model_label
+    from askanswer.llm.routing import get_router
 
     route = get_router().route(role)
     return route.spec or current_model_label()
@@ -107,8 +107,8 @@ def _role_primary_label(role: str) -> str:
 
 def cost_projection(llm_rate: float) -> list[str]:
     """按当前路由表预估「每 1000 次查询」的 LLM 兜底分类成本对比。"""
-    from askanswer.pricing import estimate_cost_usd, format_cost
-    from askanswer.routing import ROLE_ANSWER, ROLE_CLASSIFY
+    from askanswer.llm.pricing import estimate_cost_usd, format_cost
+    from askanswer.llm.routing import ROLE_ANSWER, ROLE_CLASSIFY
 
     calls = llm_rate * PROJECTION_QUERIES
     lines = [f"- LLM 兜底率 {llm_rate:.0%} → 每 {PROJECTION_QUERIES} 次查询约 {calls:.0f} 次兜底分类调用"]
@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(REPO_ROOT))
     # 放在 main 里 import：加载 askanswer 会构建模型客户端，需要 .env 就绪
     from askanswer.intents import get_intent_registry
-    from askanswer.routing import describe_routes
+    from askanswer.llm.routing import describe_routes
 
     rows = [run_case(get_intent_registry(), case) for case in load_cases(args.golden)]
     agg = aggregate(rows)
