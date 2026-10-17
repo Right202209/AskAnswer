@@ -1,66 +1,113 @@
 # AskAnswer
 
-基于 LangGraph 的命令行智能助手：按意图分流到「读本地文件 / 联网搜索 / SQL 查询 / 调研简报 / 决策备忘 / 规格演化 / 直接回答」，由 LLM 调度工具并整合结果，支持 HITL 确认、会话持久化、时间旅行与 Markdown 渲染。
+基于 LangGraph 的命令行智能助手。一句话进来，先判断意图（读文件 / 联网搜索 / SQL / 调研简报 / 决策备忘 / 规格演化 / 闲聊），再由 LLM 调度对应工具完成回答。
 
-当前状态（2026-07-16）：分层 `settings.json`（类似 Claude Code）+ `.env` 保底；`pytest` 全绿；GitHub Actions 对 Python 3.10 / 3.12 跑 ruff + pytest。CLI 已拆成 `askanswer/cli/` 包，与 HTTP/SSE 服务共用 `runner` 事件流。
+- **意图分流**：本地规则优先，歧义时才调小模型分类；对话中途可换话题
+- **人在回路**：shell、写文件、付费 API 执行前必须确认，恢复时不会重复执行
+- **会话持久化**：SQLite 保存全部会话，支持撤销、跳转、分叉（时间旅行）
+- **多入口**：CLI REPL、HTTP/SSE 服务、Python 库、MCP 服务（Helix）
+- **成本可控**：按角色路由模型、跨厂商回退、单轮 token 预算、用量与费用统计
+- **可扩展**：意图、工具、MCP server 都按注册表接入
 
-## 安装
+> 状态（2026-10-17）：架构重构完成，主图为单层 7 节点，依赖经组装根注入；227 项测试全绿。重构细节与新旧模块对照见 [`docs/design/ARCH_REFACTOR_STATUS.md`](docs/design/ARCH_REFACTOR_STATUS.md)。
+
+---
+
+## 快速开始
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e .            # Python >= 3.10
-pip install -e ".[dev]"     # + pytest / ruff
+pip install -e .                 # Python >= 3.10；开发用 pip install -e ".[dev]"
+cp .env.example .env             # 填 OPENAI_API_KEY，联网搜索再填 TAVILY_API_KEY
+
+askanswer "上海今天天气怎么样"   # 单次提问
+askanswer                         # 交互 REPL（等价 python -m askanswer）
 ```
+
+---
+
+## 使用
+
+### CLI
+
+```bash
+askanswer [问题]                  # 带问题为单次模式，不带进入 REPL
+askanswer --graph                 # 输出主图 Mermaid
+askanswer --graph docs/graph.mmd  # 写入文件（不会创建 SQLite）
+```
+
+REPL 风格类似 Claude Code：Markdown 渲染、`⏺ Node(detail)` 进度标记、输入历史存于 `~/.askanswer/history`（自动过滤密钥 / DSN）。
+
+| 分类 | 命令 |
+| --- | --- |
+| 基础 | `/help [cmd]` · `/clear` · `/status` · `/model [provider:name]` · `/exit`（或 Ctrl-D） |
+| 会话 | `/threads [关键词]` · `/resume <序号\|id>` · `/title <名字>` · `/delete <序号\|id>` · `/export` · `/import` |
+| 时间旅行 | `/checkpoints` · `/undo [n] [--label NAME]` · `/jump <index>` · `/fork [index]` |
+| 审计 / 用量 | `/audit …` · `/usage …`（token、工具次数、费用估算） |
+| 编辑 / shell | `/edit <path>` · `!<cmd>`（高风险命令二次确认；`!vim` 等自动 TTY 直通） |
+| MCP | `/mcp …`（见下） |
+
+```text
+/mcp https://example.com/mcp [name]     # 连接 HTTP MCP（路径以 /sse 结尾走 SSE）
+/mcp add_stdio <name> <cmd> [args…]     # 子进程 stdio MCP
+/mcp list [-v] | health [name] | tools [server] | remove <name>
+```
+
+MCP 连接写入 `~/.askanswer/mcp.json` 并在下次启动时自动重连；工具以 `<server>__<tool>` 命名，默认只对 chat 意图可见（`ASKANSWER_MCP_ALL_INTENTS=1` 放开）。
+
+### HTTP / SSE 服务
+
+与 CLI 共用同一张图、同一个 checkpointer 和同一条事件流，纯标准库实现。
+
+```bash
+askanswer-server                                 # 或 python -m askanswer.interfaces.http.server
+                                                 # 默认 127.0.0.1:8765
+```
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /health` | 健康检查 |
+| `POST /v1/query` | 提问；SSE 推送 `token` / `tool` / `node` / `interrupt` / `final` |
+| `POST /v1/resume` | 回复确认 / 澄清后继续（decision 格式与 CLI 一致） |
+| `GET /v1/interrupt?thread_id=` | 查询挂起中的确认 |
+
+默认只绑 localhost；可选 Bearer token（`ASKANSWER_SERVER_TOKEN`）；校验 Origin 与 JSON Content-Type；请求体上限 64 KB；全局 2 路并发，同一 thread 互斥。契约见 [`docs/important-documentation-c3-http-sse-server.md`](docs/important-documentation-c3-http-sse-server.md)。
+
+### 作为 Python 库
+
+```python
+from askanswer.graph import create_search_assistant
+from askanswer.graph.context import ContextSchema
+
+app = create_search_assistant()   # 默认持久化到 ~/.askanswer/state.db
+app.invoke(
+    {"messages": [{"role": "user", "content": "统计一下订单数量"}]},
+    config={"configurable": {"thread_id": "demo"}},
+    context=ContextSchema(db_dsn="postgresql://user:password@localhost:5432/dbname"),
+)
+```
+
+数据库连接、方言、租户等运行期参数走 LangGraph runtime context，不进入会话状态。CLI / HTTP 通过 `askanswer.runtime.runner.runtime_context_from_env()` 从环境变量自动填充。测试时可传入 `container=build_container(...)` 替换模型、存储等依赖。
+
+---
 
 ## 配置
 
-配置由入口（CLI / HTTP / MCP server）调用 `askanswer.config.ensure_environ()` 装载，导入任何模块都不会改写环境变量。支持 **settings.json**（推荐）与 **`.env`**（保底）并存；分层结果落成环境变量后，只在 `askanswer/config/loader.py` 解析成类型化的 `Settings`，业务代码只读 `Settings`。
+入口（CLI / HTTP / MCP server）启动时调用 `askanswer.config.ensure_environ()` 装载配置；导入模块本身不会改动环境变量。分层合并后的结果只在 `askanswer/config/loader.py` 解析为类型化 `Settings`，业务代码只读 `Settings`。
 
-### 优先级（高 → 低）
+### 来源与优先级（高 → 低）
 
-| 顺序 | 来源 | 说明 |
+| # | 来源 | 位置 |
 | --- | --- | --- |
-| 1 | **进程环境变量** | shell / CI `export`；启动前已存在的键**永不被文件覆盖** |
-| 2 | **Local settings** | `<repo>/.askanswer/settings.local.json`（个人，已 gitignore） |
-| 3 | **Project settings** | `<repo>/.askanswer/settings.json`（可提交，团队共享） |
-| 4 | **User settings** | `~/.askanswer/settings.json`（跨项目；见路径说明） |
-| 5 | **`.env`** | 项目根目录；**最低保底**，只填补仍空缺的变量 |
+| 1 | 进程环境变量 | shell / CI 的 `export`，**永不被文件覆盖** |
+| 2 | Local settings | `<repo>/.askanswer/settings.local.json`（个人，已 gitignore） |
+| 3 | Project settings | `<repo>/.askanswer/settings.json`（可提交，团队共享） |
+| 4 | User settings | `~/.askanswer/settings.json`（或 `$XDG_CONFIG_HOME/askanswer/settings.json`、`$ASKANSWER_SETTINGS`） |
+| 5 | `.env` | 项目根目录，只补仍空缺的变量 |
 
-> 实现要点：先快照进程已有键 → `load_dotenv(override=False)` → settings 以 `override=True` 盖过 `.env`，但 `protect` 快照键。损坏或缺失的 JSON 静默忽略，不阻塞启动。
+`<repo>` 从当前目录向上查找 `.git` / `pyproject.toml` / `.askanswer`。JSON 损坏或缺失会被静默忽略。完整模板见 [`settings.example.json`](settings.example.json)。
 
-### 快速上手
-
-**方式 A — 只用 `.env`（最简单）**
-
-```bash
-cp .env.example .env
-# 编辑 OPENAI_API_KEY / TAVILY_API_KEY 等
-```
-
-**方式 B — settings.json（推荐结构化配置）**
-
-```bash
-mkdir -p ~/.askanswer
-cp settings.example.json ~/.askanswer/settings.json
-# 或项目级：mkdir -p .askanswer && cp settings.example.json .askanswer/settings.json
-# 个人覆盖（勿提交）：cp settings.example.json .askanswer/settings.local.json
-```
-
-密钥可放在 settings 的 `env` 块，也可继续放在 `.env` 做保底；进程里 `export` 的值始终最高。
-
-### settings.json（类似 Claude Code）
-
-#### 路径
-
-| 作用域 | 默认路径 | 覆盖方式 |
-| --- | --- | --- |
-| User | `~/.askanswer/settings.json` | `$XDG_CONFIG_HOME/askanswer/settings.json`，或 `ASKANSWER_SETTINGS=/path/to.json` |
-| Project | `<repo>/.askanswer/settings.json` | 从 cwd 向上找 `.git` / `pyproject.toml` / `.askanswer` |
-| Local | `<repo>/.askanswer/settings.local.json` | 同 project；gitignored |
-
-完整模板：[`settings.example.json`](settings.example.json)。
-
-#### 示例
+### settings.json 示例
 
 ```json
 {
@@ -69,284 +116,155 @@ cp settings.example.json ~/.askanswer/settings.json
     "classify": "openai:gpt-4o-mini",
     "evaluate": "openai:gpt-4o-mini",
     "summarize": "openai:gpt-4o-mini",
-    "fallbacks": {
-      "answer": ["openai:gpt-4o", "deepseek:deepseek-chat"]
-    }
+    "fallbacks": { "answer": ["openai:gpt-4o", "deepseek:deepseek-chat"] }
   },
   "context": { "max_tokens": 24000, "digest": "brief" },
   "run_token_budget": 60000,
   "tenant_id": "alice",
   "db_path": "~/.askanswer/state.db",
-  "mcp_all_intents": false,
   "env": {
     "OPENAI_API_KEY": "sk-...",
-    "TAVILY_API_KEY": "...",
-    "OPENWEATHER_API_KEY": ""
+    "TAVILY_API_KEY": "..."
   }
 }
 ```
 
-#### 一等字段 → 环境变量
+### 配置项一览
 
-| JSON 字段 | 展开为 | 说明 |
+| settings.json 字段 | 环境变量 | 说明 |
 | --- | --- | --- |
-| `model` | `ASKANSWER_DEFAULT_MODEL` | 启动默认模型（`/model` 仍可热切换） |
-| `models.classify` / `.evaluate` / `.summarize` / `.answer` | `ASKANSWER_MODEL_<ROLE>` | 按角色路由 |
-| `models.fallbacks.<role>` | `ASKANSWER_MODEL_FALLBACKS_<ROLE>` | 数组会拼成逗号分隔列表 |
-| `context.max_tokens` | `ASKANSWER_CONTEXT_MAX_TOKENS` | answer 历史 token 预算 |
-| `context.digest` | `ASKANSWER_CONTEXT_DIGEST` | `brief` 或 `llm` |
+| `env.*` | 原样写入 | 任意变量，如 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `TAVILY_API_KEY` / `OPENWEATHER_API_KEY`；同名时覆盖下方字段 |
+| `model` | `ASKANSWER_DEFAULT_MODEL` | 默认模型，默认 `openai:gpt-5.4`；`/model` 可热切换 |
+| `models.<role>` | `ASKANSWER_MODEL_<ROLE>` | 按角色路由：`classify` / `evaluate` / `summarize` / `answer` |
+| `models.fallbacks.<role>` | `ASKANSWER_MODEL_FALLBACKS_<ROLE>` | 回退链（环境变量用逗号分隔） |
+| `context.max_tokens` | `ASKANSWER_CONTEXT_MAX_TOKENS` | 回答时带入的历史 token 预算 |
+| `context.digest` | `ASKANSWER_CONTEXT_DIGEST` | 超预算历史的压缩方式：`brief` / `llm` |
 | `run_token_budget` | `ASKANSWER_RUN_TOKEN_BUDGET` | 单轮 token 上限 |
-| `tenant_id` / `tenantId` | `ASKANSWER_TENANT_ID` | 多租户隔离 |
-| `db_path` / `dbPath` | `ASKANSWER_DB_PATH` | SQLite 状态库路径 |
-| `db_dialect` / `dbDialect` | `ASKANSWER_DB_DIALECT` | SQL agent 方言 |
-| `mcp_profile` / `mcpProfile` | `ASKANSWER_MCP_PROFILE` | MCP 自动连接 profile |
-| `mcp_all_intents` / `mcpAllIntents` | `ASKANSWER_MCP_ALL_INTENTS` | bool → `1` / `0` |
-| `server_token` / `serverToken` | `ASKANSWER_SERVER_TOKEN` | HTTP Bearer |
-| `env` | 任意键原样写入 | **同名时覆盖**上方一等字段 |
+| `db_path` | `ASKANSWER_DB_PATH` | 状态库路径，默认 `~/.askanswer/state.db` |
+| `tenant_id` | `ASKANSWER_TENANT_ID` | 多租户隔离 |
+| `db_dialect` | `ASKANSWER_DB_DIALECT` | SQL agent 方言，留空则从连接推断 |
+| — | `WLANGGRAPH_POSTGRES_DSN` | SQL agent 默认数据库 |
+| `mcp_profile` | `ASKANSWER_MCP_PROFILE` | MCP 自动连接 profile |
+| `mcp_all_intents` | `ASKANSWER_MCP_ALL_INTENTS` | MCP 工具对所有意图可见 |
+| `server_token` | `ASKANSWER_SERVER_TOKEN` | HTTP Bearer token |
+| — | `ASKANSWER_READ_FILE_MAX_BYTES` / `ASKANSWER_WRITE_FILE_MAX_BYTES` / `ASKANSWER_SHELL_OUTPUT_MAX_BYTES` | 读文件 10 MB / 写文件 1 MB / shell 每路输出 64 KB |
+| — | `LANGSMITH_API_KEY` / `ASKANSWER_OTEL_EXPORTER` | 可选的可观测导出，关闭时零开销 |
 
-### `.env`（最低保底）
+驼峰写法（`tenantId`、`dbPath` 等）同样识别。
 
-项目根目录创建 `.env`（参考 [`.env.example`](.env.example)）。仅在变量尚未被进程或 settings 设置时生效：
+### 模型路由与成本
 
-```
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=...           # 可选
-TAVILY_API_KEY=...            # 联网搜索
-OPENWEATHER_API_KEY=...       # 可选，天气工具
-WLANGGRAPH_POSTGRES_DSN=...   # 可选，SQL agent 默认库
-ASKANSWER_DB_DIALECT=         # 可选；留空则从连接推断
-ASKANSWER_DB_PATH=            # 可选；默认 ~/.askanswer/state.db
-ASKANSWER_TENANT_ID=          # 可选；多租户
-ASKANSWER_SERVER_TOKEN=       # 可选；HTTP 鉴权
-ASKANSWER_DEFAULT_MODEL=      # 可选；默认 openai:gpt-5.4
-```
+不配 `models` 时与单模型完全一致。配置后：分类 / 评估 / 摘要可用小模型，主回答可设跨厂商回退链；回退会记 `model_fallback` 审计事件，token 归到实际执行的模型；`/status` 显示当前路由，`/usage` 按标签分账（价格表 `askanswer/llm/pricing.py`）。系统提示按「稳定前缀 → 动态尾部」组织以命中 prompt cache，`anthropic:*` 模型自动加 `cache_control`。
 
-### 模型路由与成本控制（可选，默认关闭）
+离线意图评测：`python evals/run_intent_eval.py`（见 `evals/README.md`）。
 
-按角色给不同任务配不同模型：分类 / 评估 / 摘要用小模型，主回答可配跨厂商回退链。未设置时与单模型模式完全一致（`/model` 语义不变）。
+---
 
-**推荐写在 settings.json**（见上表 `models` / `context` / `run_token_budget`），等价环境变量：
+## 能力
 
-```
-ASKANSWER_MODEL_CLASSIFY=openai:gpt-4o-mini
-ASKANSWER_MODEL_EVALUATE=openai:gpt-4o-mini
-ASKANSWER_MODEL_SUMMARIZE=openai:gpt-4o-mini
-ASKANSWER_MODEL_FALLBACKS_ANSWER=openai:gpt-4o,deepseek:deepseek-chat
-ASKANSWER_CONTEXT_MAX_TOKENS=24000
-ASKANSWER_CONTEXT_DIGEST=brief
-ASKANSWER_RUN_TOKEN_BUDGET=60000
-```
+### 意图与工具
 
-- 回退写 `model_fallback` 审计事件；token 归因到**真正执行**的模型；`/status` 显示非默认路由，`/usage` 按标签分账（价格表见 `askanswer/llm/pricing.py`）。
-- system prompt 按「稳定前缀 → 动态尾部」排序以命中 prompt cache；answer 指向 `anthropic:*` 时自动加 `cache_control`。
-- 离线评测：`python evals/run_intent_eval.py`（见 `evals/README.md`）；设计说明：`docs/important-documentation-d1-routing-context-cost-eval.md`。
+内置工具（`tavily_search`、`read_file`、`get_current_time`、`check_weather`、`calculate`、`convert_currency`、`lookup_ip`、`pwd`）对所有意图可见；下表列出每个意图额外拿到的专属工具。
 
-### 其他常用环境变量
-
-| 变量 | 说明 |
-| --- | --- |
-| `ASKANSWER_SETTINGS` | 覆盖 **user** 层 settings.json 路径 |
-| `ASKANSWER_MCP_ALL_INTENTS` | `1` 时 MCP 工具对所有意图可见（默认仅 chat） |
-| `ASKANSWER_READ_FILE_MAX_BYTES` | `read_file` 上限（默认 10 MB） |
-| `ASKANSWER_WRITE_FILE_MAX_BYTES` | `write_file` 上限（默认 1 MB） |
-| `ASKANSWER_SHELL_OUTPUT_MAX_BYTES` | shell 每路输出上限（默认 64 KB） |
-| `LANGSMITH_API_KEY` / `ASKANSWER_OTEL_EXPORTER` | 可选可观测导出（关则零开销） |
-
-### 库 API 与 runtime context
-
-SQL agent 等从 LangGraph runtime context 读库配置（不写进 `SearchState`）：
-
-```python
-from askanswer.graph import create_search_assistant
-from askanswer.schema import ContextSchema
-
-app = create_search_assistant()
-app.invoke(
-    {"messages": [{"role": "user", "content": "统计一下订单数量"}]},
-    context=ContextSchema(db_dsn="postgresql://user:password@localhost:5432/dbname"),
-)
-```
-
-CLI / HTTP 会把环境中的 `WLANGGRAPH_POSTGRES_DSN` / `ASKANSWER_DB_DIALECT` / `ASKANSWER_TENANT_ID` 注入 context（`runner.runtime_context_from_env()`），来源可以是 settings、`.env` 或进程 export。
-
-## 使用
-
-```bash
-askanswer "上海今天天气怎么样"   # 单次提问
-askanswer                         # 交互 REPL
-python -m askanswer               # 等价入口
-askanswer --graph                 # 输出主图 Mermaid
-askanswer --graph docs/graph.mmd  # 写入文件（不创建 SQLite）
-```
-
-### HTTP / SSE 服务
-
-与 CLI 共用同一图、checkpointer 与 `runner` 事件流（零额外依赖，stdlib only）：
-
-```bash
-python -m askanswer.interfaces.http.server        # 默认 127.0.0.1:8765
-# 或 reinstall 后：askanswer-server
-```
-
-| 端点 | 说明 |
-| --- | --- |
-| `GET /health` | 健康检查 |
-| `POST /v1/query` | 提问，SSE 推送 `token` / `tool` / `node` / `interrupt` / `final` |
-| `POST /v1/resume` | HITL 续跑（decision 形态与 CLI 一致） |
-| `GET /v1/interrupt?thread_id=` | 查询挂起的 interrupt |
-
-安全基线：默认只绑 localhost；可选 Bearer token；Origin + JSON Content-Type 双闸；64KB body 上限；全局 2 路并发 + 同 thread 互斥。契约见 `docs/important-documentation-c3-http-sse-server.md`。
-
-### 交互模式界面
-
-启动后进入类 Claude Code 的 REPL：圆角欢迎框、箱式输入、进度标记 `⏺ Node(detail)`，回答以 Markdown 渲染（重定向到文件时退化为纯文本）。输入历史在 `~/.askanswer/history`（自动过滤 API key / DSN 等敏感模式）。
-
-#### 斜线命令
-
-| 命令 | 说明 |
-| --- | --- |
-| `/help [cmd]` | 显示帮助 |
-| `/clear` | 清屏并开启新会话 |
-| `/status` | 当前会话（含 MCP / model） |
-| `/model [provider:name]` | 查看或热切换模型 |
-| `/mcp …` | 管理 MCP（见下） |
-| `/threads [关键词]` | 列出历史会话 |
-| `/resume <序号\|id>` | 恢复指定会话 |
-| `/title <名字>` | 给当前会话命名 |
-| `/delete <序号\|id>` | 删除会话 |
-| `/checkpoints` | 列出当前会话快照 |
-| `/undo [n] [--label NAME]` | 回退；可命名还原点 |
-| `/jump <index>` | 跳到指定快照 |
-| `/fork [index]` | 从快照分叉新会话 |
-| `/audit …` | 审计事件 |
-| `/usage …` | token / 工具用量与费用估算 |
-| `/export` / `/import` | 会话导出（md/json）/ 导入 |
-| `/edit <path>` | 用系统编辑器打开文件（`$ASKANSWER_EDITOR` / `$VISUAL` / `$EDITOR` → nano/vim…） |
-| `/exit` / `/quit` / `/q` | 退出（也可 Ctrl-D） |
-
-快捷前缀 `!<cmd>`：在 REPL 中直接执行 shell（如 `!ls -la`）；命中高风险模式时二次确认。`!vim` / `!nano` 等全屏程序自动 TTY 直通，可直接编辑文件；也可用 `/edit <path>`。
-
-#### MCP
-
-```text
-/mcp https://example.com/mcp            # 连接（自动推导服务名；路径以 /sse 结尾走 SSE）
-/mcp https://example.com/mcp my-server  # 指定服务名
-/mcp add_stdio <name> <cmd> [args…]     # 子进程 stdio MCP
-/mcp list [-v]                          # 列表（-v 含健康详情）
-/mcp health [name]                      # 健康探测并刷新工具
-/mcp tools [server]                     # 列出工具
-/mcp remove <name>                      # 断开
-```
-
-连接会写入 `~/.askanswer/mcp.json`，下次启动自动重连。多 server 工具以 `<server>__<tool>` 暴露；`call_tool` 按前缀路由。每个 server 的上下文管理器在同一 asyncio 任务内进入/退出，避免 anyio cancel-scope 跨任务问题。
-
-### Helix 规格演化
-
-`helix_spec_loop`：`interview → seed → execute → evaluate → (seed 重跑 | finalize)`。模糊需求（「用苏格拉底问我…」「spec-first…」「需求澄清…」等）命中 `helix` 意图后调用：
-
-- **interview**：scope / constraints / outputs / verification 四轨关键问题并自答（标 `assumption:`）
-- **seed** → **execute** → **evaluate**（覆盖率 + 0–1 对齐分 + gaps）
-- rejected 时最多 `MAX_GENERATIONS=3` 代回到 seed 修补
-
-返回 Markdown：`## Goal / Constraints / Acceptance criteria / Artifact / Evaluation / Lineage`。也可单独当 MCP 服务：`python -m askanswer.interfaces.mcp_server.helix_server`。设计见 `docs/helix-subgraph-plan.md`。
-
-### 澄清协议（C2）
-
-主图的 `clarify` 节点：意图 handler 可在首轮回答前 `interrupt` 一次（路径缺失、无 DSN、调研话题过短等）。CLI 用箭头菜单 + 可选自由文本；非 TTY 取默认「不改动」选项，行为非回归。
-
-### HITL 确认
-
-三类确认共用 `safety/approvals.py` 四步协议（plan → gate → interrupt → apply）：
-
-| 类 | 典型工具 | CLI 提示 |
+| 意图 | 专属工具 | 说明 |
 | --- | --- | --- |
-| `shell` | `gen_shell_commands_run` | 执行 / 取消 / 重生成 / 编辑 |
-| `fs_write` | `write_file` | diff 预览后写入 / 取消 |
-| `external_api_paid` | 付费外部 API | 参数 + 费用警告；审计会脱敏密钥与邮箱 |
+| `chat` | 全部子图工具、shell、`write_file`、MCP 工具 | 通用对话，能力最全 |
+| `search` | shell | 联网搜索：Tavily Top 5 + 综合答案 |
+| `file_read` | shell、`write_file` | `markitdown` 把 pdf/docx/xlsx/代码转成 Markdown，由主模型分析 |
+| `sql` | `sql_query` | 自然语言 → SQL agent 子图；刻意不给 shell |
+| `math` | — | 用 `calculate` 安全求值 |
+| `research` | `research_brief_loop`、shell | 规划查询 → 搜索 → 综合 → 来源核验 |
+| `decision` | `decision_memo_loop`、`helix_spec_loop`、shell | 复用 Helix interview 产出决策备忘 |
+| `helix` | `helix_spec_loop` | 规格优先演化（见下） |
 
-## 结构
+**Helix 规格演化**：`interview → seed → execute → evaluate → (重跑 seed | finalize)`，最多 3 代。interview 从 scope / constraints / outputs / verification 四个方向提问并自答（标注 `assumption:`），evaluate 给出覆盖率、0–1 对齐分和缺口。输出 `Goal / Constraints / Acceptance criteria / Artifact / Evaluation / Lineage`。可单独作为 MCP 服务运行：`python -m askanswer.interfaces.mcp_server.helix_server`。
 
-包名仍为 `askanswer`，内部按层组织（依赖方向：interfaces → runtime → graph → intents/tools/agents → llm/storage/observability → config/core）：
+### 澄清
+
+意图 handler 可在首轮回答前提问一次（如文件路径缺失、无 DSN、调研话题过短）。CLI 用箭头菜单加可选自由输入；非交互环境取默认「不改动」选项。
+
+### 确认（HITL）
+
+三类操作共用 `safety/approvals.py` 的四步协议（plan → gate → interrupt → apply）：
+
+| 类别 | 工具 | 用户可选 |
+| --- | --- | --- |
+| `shell` | `gen_shell_commands_run` | 执行 / 取消 / 重新生成 / 编辑；高风险命令直接拦截 |
+| `fs_write` | `write_file` | 查看 diff 后写入 / 取消；敏感路径拦截 |
+| `external_api_paid` | 付费外部 API | 查看参数与费用后执行 / 取消；审计脱敏密钥与邮箱 |
+
+---
+
+## 架构
+
+### 主图
+
+单层 7 节点，无子图嵌套：
+
+```
+START → route → clarify → reason ─┬─(无工具调用)─→ review ─┬→ END
+                                  │                        └→ reason（重试）
+                                  ├─(普通工具)───→ act → reason
+                                  └─(需确认)─────→ plan_approvals → ask_approval ⟲ → act
+```
+
+| 节点 | 职责 |
+| --- | --- |
+| `route` | 本地分类器（关键词 / 正则，按 handler 优先级）优先，歧义才调 classify 模型；意图参数写入 `slots` |
+| `clarify` | handler 可选提问一次，默认直接透传 |
+| `reason` | 按意图选系统提示和工具集，调用主模型；唯一向外流式输出 token 的节点 |
+| `plan_approvals` | 把需确认的调用规划进 `pending_confirmations` |
+| `ask_approval` | 每次只询问一项并把决定写回状态，无副作用，可安全重跑 |
+| `act` | 一次性执行普通工具和已批准的操作（`apply` 内二次校验） |
+| `review` | 调用 `handler.evaluate` 并检查 token 预算；重试次数按意图（search 2，sql / file_read 1，其他 0） |
+
+节点均由 `make_xxx_node(container)` 生成，依赖来自 `runtime/container.py`。拓扑变更需同步更新 `tests/golden/graph.mmd`。
+
+### 目录
+
+依赖方向：`interfaces → runtime → graph → intents / tools / agents → llm / storage / observability → config / core`
 
 ```
 askanswer/
-├── core/types.py            # Phase / Risk / capability 等纯领域类型
-├── config/                  # Settings（Pydantic）/ loader（唯一读 env 处）/ layers（settings.json 分层 + ensure_environ）/ paths
-├── llm/                     # models（/model 热切换代理）/ routing（按角色路由 + 回退）/ context（历史预算）/ pricing
-├── graph/                   # 主图：state / context(ContextSchema) / edges / builder
-│   └── nodes/               # route / clarify / reason / approvals(plan+ask) / act / review
-├── intents/                 # chat / search / file_read / sql / math / helix / research / decision
-├── tools/                   # registry（risk / capability / 审批声明校验）/ builtin（内置工具）
-├── agents/                  # sql / helix / research / decision 子图 → 注册为工具
-├── mcp/                     # manager（多 server 生命周期 + 工具包装）/ profile（mcp.json）
-├── safety/approvals.py      # 审批协议（shell / fs_write / external_api_paid）
-├── storage/                 # db（连接 + 迁移）/ models / repos/{threads,audit,labels} / store（门面）
-├── observability/           # bus（事件总线）/ audit（审计订阅者）/ telemetry（LangSmith + OTEL）
-├── runtime/                 # container（组装根）/ runner（UI 无关事件流）/ timetravel
+├── core/            纯领域类型：Phase / Risk / capability
+├── config/          Settings、loader（唯一读环境变量处）、分层 settings.json、路径
+├── llm/             模型代理（/model 热切换）、角色路由与回退、历史预算、价格表
+├── graph/           state、ContextSchema、edges、builder
+│   └── nodes/       route / clarify / reason / approvals / act / review
+├── intents/         chat / search / file_read / sql / math / helix / research / decision
+├── tools/           ToolRegistry（风险、能力、确认声明校验）+ 内置工具
+├── agents/          sql / helix / research / decision 子图，注册为工具
+├── mcp/             多 server 生命周期、工具包装、mcp.json
+├── safety/          确认协议
+├── storage/         db（连接 + WAL + 迁移）、models、repos/{threads,audit,labels}、Store 门面
+├── observability/   事件总线、审计订阅者、telemetry（LangSmith / OTEL）
+├── runtime/         Container（组装根）、runner（UI 无关事件流）、时间旅行
 └── interfaces/
-    ├── cli/                 # REPL：app / stream / repl / confirm / render / input / select / spinner / commands/*
-    ├── http/                # server + wire（HTTP/SSE）
-    └── mcp_server/          # helix_server（Helix 作为独立 MCP 服务）
+    ├── cli/         REPL 与斜线命令
+    ├── http/        HTTP/SSE 服务
+    └── mcp_server/  Helix MCP 服务
 ```
 
+### 持久化与可观测
 
-## 工作流
+- **状态库**：一个 SQLite 文件（默认 `~/.askanswer/state.db`）同时存 LangGraph checkpoint 和自有表 `thread_meta` / `audit_event` / `checkpoint_label`，schema 自动迁移，按 `tenant_id` 隔离
+- **存储分层**：`storage/db.py` → `storage/repos/*`（每表一个 repo）→ `storage/store.py`（`get_store()`）；删除会话走 `SqliteSaver.delete_thread`
+- **事件总线**：业务代码只调用 `log_event` 发布事件；审计（按轮缓冲、批量落库）和 telemetry 都是订阅者，订阅者出错不影响主流程
+- **时间旅行**：`/checkpoints` `/undo` `/jump` `/fork`；有挂起确认时拒绝回退
 
-主图是单层扁平的 7 个节点（不再有父图 + react 子图）：
+---
 
-```
-START → route → clarify → reason ─┬─(无工具调用)──→ review ─┬→ END
-                                  ├─(普通工具)──→ act → reason   └→ reason（重试）
-                                  └─(需审批)──→ plan_approvals → ask_approval ⟲ → act
-```
-
-- **route**：本地分类器优先（关键词/正则，handler 按 priority），歧义时才调 classify 角色模型；intent 专用参数写进 `slots`
-- **clarify**：handler 可选提问一次（interrupt），默认无开销透传
-- **reason**：按 `intent` 选系统提示与工具集（`registry.list(tags=…)`）；每轮重判意图支持中途换话题
-- **plan_approvals → ask_approval → act**：需审批的调用先规划写入 `pending_confirmations`；`ask_approval` 每次只 `interrupt()` 询问一项并把决定写回 state（无副作用，可安全重跑）；全部决定后 `act` 一次性执行普通工具与已批准的动作（不 interrupt，`apply` 内二次校验）。恢复时不会重复执行任何工具
-- **review**：委托 `handler.evaluate`（模型由组装根注入）+ 本轮 token 预算闸门；重试预算按意图（search=2，sql/file_read=1，其余 0）
-
-所有节点都由 `make_xxx_node(container)` 生成；`create_search_assistant(checkpointer, container=build_container(...))` 可注入替身做测试。拓扑变更需同步 `tests/golden/graph.mmd`。
-
-## 意图与工具
-
-意图经 `IntentRegistry` 注册；工具经 `ToolRegistry` 按 tag 过滤。内置工具默认对多意图可见；shell 不进 SQL bundle。
-
-| 工具 | 说明 |
-| --- | --- |
-| `tavily_search` | Tavily 联网搜索 Top 5 + 综合答案 |
-| `read_file` | `markitdown` 解析任意文件后由 LLM 总结 |
-| `sql_query` | 自然语言 → SQL agent 子图（DSN/方言/租户来自 context） |
-| `research_brief_loop` | 调研简报：规划查询 → 搜索 → 综合 → 来源核验 |
-| `decision_memo_loop` | 决策备忘：复用 Helix interview + decide |
-| `helix_spec_loop` | 规格优先演化（最多 3 代） |
-| `check_weather` | OpenWeather 实时天气 |
-| `get_current_time` | 指定时区当前时间 |
-| `calculate` | 安全表达式计算 |
-| `convert_currency` | 货币汇率换算 |
-| `lookup_ip` | IP 地理与运营商 |
-| `pwd` | 当前工作目录 |
-| `gen_shell_commands_run` | 生成并执行 shell；高风险拦截 + HITL |
-| `write_file` | 写文件（敏感路径拦截、大小上限、diff 预览）+ `fs_write` 确认 |
-
-MCP 工具以 `<server>__<tool>` 自动入表。
-
-## 持久化与可观测
-
-- **状态 DB**：默认 `~/.askanswer/state.db`（`SqliteSaver` + `thread_meta` + `audit_event`，schema 自迁移；支持 `tenant_id`）
-- **时间旅行**：`/checkpoints` `/undo` `/jump` `/fork`（有挂起确认时拒绝 rewind）
-- **审计 / 用量**：LLM token、工具调用写入 `audit_event`；`/usage` 可估算费用（`pricing.py`）
-- **Telemetry**：`telemetry/` 可选 LangSmith / OpenTelemetry，默认关闭
-
-## 开发与验证
+## 开发
 
 ```bash
-pytest -q                       # 全量（无需 API key；conftest 隔离 env + 临时 DB）
-ruff check askanswer tests      # lint 基线 E/F/I
-python -m compileall askanswer
-python -m askanswer --graph -   # 图拓扑可编译
+pip install -e ".[dev]"
+pytest -q                        # 无需 API key；conftest 隔离环境变量与临时 DB
+ruff check askanswer tests       # 规则 E / F / I
+python -m askanswer --graph -    # 校验图可编译
 ```
 
-CI：`.github/workflows/ci.yml` 在 push/PR 到 `master` 时对 3.10 / 3.12 跑 ruff + pytest。
+CI（`.github/workflows/ci.yml`）在 push / PR 到 `master` 时对 Python 3.10 与 3.12 运行 ruff + pytest。
 
-更细的架构索引见 `CLAUDE.md` / `AGENTS.md` → `.claude/mem/*`；变更日志见 `CHANGELOG.md`；待办见 `TODO.md`。
+**扩展**：新意图实现 `IntentHandler` 并注册到 `IntentRegistry`；新工具注册到 `ToolRegistry` 并声明 tags、风险与确认类别。细节见 `plan-docs/mem/architecture-extensibility.md`。
+
+**文档**：架构笔记 `plan-docs/mem/` · 重构状态 `docs/design/ARCH_REFACTOR_STATUS.md` · 变更日志 `CHANGELOG.md` · 待办 `TODO.md`
