@@ -61,9 +61,9 @@ def _reclassify_intent(state: SearchState) -> str | None:
     返回新的 intent 字符串；返回 ``None`` 表示这次不需要切换（例如最新一条不是
     新的真人输入，或本地分类器拿不准）。
     """
-    if state.get("step") == "retry_search":
-        # sorcery 触发的“重新搜索”重试不是新一轮提问，原始 intent 已在
-        # understand 阶段确定，跳过避免反转。
+    if state.get("step") in ("retry_search", "understood"):
+        # understood：本轮刚由 understand 节点分类过，没必要再判一次
+        # retry_search：sorcery 触发的重试不是新一轮提问，跳过避免反转。
         return None
     messages = state.get("messages") or []
     if not messages:

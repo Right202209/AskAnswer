@@ -20,7 +20,20 @@ from zoneinfo import ZoneInfo
 from langchain_core.tools import tool
 from markitdown import MarkItDown
 
-from .load import model, openweather_api_key, tavily_client
+from .load import get_tavily_client, openweather_api_key
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+# 所有外部 HTTP 请求的统一超时（秒），避免网络工具无限挂起（架构文档 P10）。
+HTTP_TIMEOUT_SECONDS = 10
+TAVILY_TIMEOUT_SECONDS = 30
 
 
 @tool
@@ -28,14 +41,15 @@ def check_weather(city: str) -> str:
     """查询指定城市的实时天气。参数 city 为城市名，例如 Beijing。"""
 
     # API Key 缺失时给出明确提示，而不是抛异常 —— 更友好且不影响图流程
-    if not openweather_api_key:
+    api_key = openweather_api_key()
+    if not api_key:
         return "未配置 OPENWEATHER_API_KEY"
 
     # 拼接 OpenWeather One Call 接口的查询串：公制单位 + 中文描述
     query = urlencode(
         {
             "q": city,
-            "appid": openweather_api_key,
+            "appid": api_key,
             "units": "metric",
             "lang": "zh_cn",
         }
@@ -43,7 +57,7 @@ def check_weather(city: str) -> str:
     url = f"https://api.openweathermap.org/data/2.5/weather?{query}"
 
     try:
-        with urlopen(url) as response:
+        with urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read().decode("utf-8"))
 
         # 接口返回 cod 字段表示状态；非 200 视为查询失败
@@ -127,7 +141,7 @@ def convert_currency(amount: float, from_currency: str, to_currency: str) -> str
     url = f"https://open.er-api.com/v6/latest/{base}"
 
     try:
-        with urlopen(url, timeout=10) as response:
+        with urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read().decode("utf-8"))
 
         if data.get("result") != "success":
@@ -154,7 +168,7 @@ def lookup_ip(ip: str = "") -> str:
     try:
         # 显式带 UA：部分免费接口会拒绝缺省 UA
         request = Request(url, headers={"User-Agent": "AskAnswer/0.1"})
-        with urlopen(request, timeout=10) as response:
+        with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read().decode("utf-8"))
 
         if data.get("error"):
@@ -169,26 +183,40 @@ def lookup_ip(ip: str = "") -> str:
         return f"IP 查询失败：{exc}"
 
 
+# read_file 返回给模型的最大字符数；超出部分截断并注明（可用环境变量调整）。
+def _read_file_max_chars() -> int:
+    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
+    return _env_int("ASKANSWER_READ_FILE_MAX_CHARS", 60_000)
+
+
 @tool
 def read_file(path: str) -> str:
     """
-    读取不同类型的文件并进行智能解析。
+    读取本地文件（pdf/docx/xlsx/csv/代码/文本等），返回转换后的 Markdown 文本。
     参数: path (str): 文件路径
-    返回: str: AI 对文件内容的分析结果
+    返回: str: 文件内容（过长时截断）。由你基于内容完成分析与回答。
     """
     # 安全闸门：拦截敏感文件、超大文件、不存在或非普通文件的路径，避免被 prompt
     # 注入诱导去读 SSH/凭据/历史数据库或喂入畸形大文件拖垮进程。
     error = _validate_read_path(path)
     if error:
         return error
-    # 先用 markitdown 把任何格式（pdf/docx/xlsx/...）转成统一的 Markdown 文本
-    data = markitdown(path)
-    # 再交给 LLM 做语义分析；结构化文件说字段，代码文件解释逻辑
-    resp = model.invoke(f"分析这个文件,解释内容，"
-                 f"包括结构、用途和关键信息。"
-                 f"如果是代码就解释逻辑，如果是数据文件就说明字段，如果是二进制文件就说明用途。"
-                 f"以下是文件:\n{data}")
-    return resp.content
+    # 用 markitdown 把任何格式（pdf/docx/xlsx/...）转成统一的 Markdown 文本。
+    # 工具本身不再调用 LLM 做摘要（架构文档 P8）：分析交给 answer 节点的主模型，
+    # 避免绕开模型路由与用量统计，也避免信息被压缩两次。
+    try:
+        data = markitdown(path)
+    except Exception as exc:
+        return f"读取文件失败：{exc}"
+    return _truncate_text(data or "", _read_file_max_chars(), label="文件内容")
+
+
+def _truncate_text(text: str, limit: int, *, label: str) -> str:
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return f"{text[:limit]}\n[{label} 已截断，省略 {omitted} 字符]"
+
 
 def markitdown(file_path: str) -> str:
     """把任意支持的文件类型转成 Markdown 文本，作为 read_file 的预处理步骤。"""
@@ -198,7 +226,9 @@ def markitdown(file_path: str) -> str:
 
 
 # read_file 安全限制：默认 10 MB，可通过环境变量 ASKANSWER_READ_FILE_MAX_BYTES 调整
-_READ_FILE_MAX_BYTES = int(os.environ.get("ASKANSWER_READ_FILE_MAX_BYTES") or 10 * 1024 * 1024)
+def _read_file_max_bytes() -> int:
+    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
+    return _env_int("ASKANSWER_READ_FILE_MAX_BYTES", 10 * 1024 * 1024)
 
 # 命中即拒绝读取的敏感文件名/扩展（不区分大小写）。
 # 设计：宁可误拒少数同名普通文件，也不能让 LLM 把凭据/密钥读进上下文。
@@ -243,9 +273,9 @@ def _validate_read_path(path: str) -> str | None:
         size = resolved.stat().st_size
     except OSError as exc:
         return f"获取文件大小失败：{exc}"
-    if size > _READ_FILE_MAX_BYTES:
+    if size > _read_file_max_bytes():
         return (
-            f"文件过大（{size} 字节 > 上限 {_READ_FILE_MAX_BYTES}）；"
+            f"文件过大（{size} 字节 > 上限 {_read_file_max_bytes()}）；"
             f"如需读取，调整 ASKANSWER_READ_FILE_MAX_BYTES 环境变量。"
         )
     return None
@@ -253,7 +283,9 @@ def _validate_read_path(path: str) -> str | None:
 
 # write_file 安全限制：默认 1 MB，可通过环境变量 ASKANSWER_WRITE_FILE_MAX_BYTES 调整。
 # 写入内容会随规划一起进入 checkpoint（tool_call args），上限刻意比读取小一个量级。
-_WRITE_FILE_MAX_BYTES = int(os.environ.get("ASKANSWER_WRITE_FILE_MAX_BYTES") or 1024 * 1024)
+def _write_file_max_bytes() -> int:
+    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
+    return _env_int("ASKANSWER_WRITE_FILE_MAX_BYTES", 1024 * 1024)
 # fs_write 确认框里 diff / 预览的最大行数，超出截断
 _WRITE_DIFF_MAX_LINES = 200
 _WRITE_PREVIEW_MAX_LINES = 40
@@ -284,9 +316,9 @@ def validate_write_path(path: str, content: str) -> str | None:
         # 刻意不自动创建目录：目录级副作用应该由用户显式完成
         return f"父目录不存在：{parent}"
     size = len(content.encode("utf-8", errors="replace"))
-    if size > _WRITE_FILE_MAX_BYTES:
+    if size > _write_file_max_bytes():
         return (
-            f"写入内容过大（{size} 字节 > 上限 {_WRITE_FILE_MAX_BYTES}）；"
+            f"写入内容过大（{size} 字节 > 上限 {_write_file_max_bytes()}）；"
             f"如需写入，调整 ASKANSWER_WRITE_FILE_MAX_BYTES 环境变量。"
         )
     return None
@@ -366,8 +398,12 @@ def tavily_search(query: str) -> str:
 
     try:
         # search_depth=basic 速度快；include_answer 让 Tavily 顺带给一个综合摘要
-        response = tavily_client.search(
-            query=query, search_depth="basic", max_results=5, include_answer=True
+        response = get_tavily_client().search(
+            query=query,
+            search_depth="basic",
+            max_results=5,
+            include_answer=True,
+            timeout=TAVILY_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         return f"搜索失败：{exc}"
@@ -450,41 +486,6 @@ def _clean_command(raw: str) -> str:
             lines = lines[:-1]
         s = "\n".join(lines).strip()
     return s.lstrip("$").strip()
-
-
-def gen_shell_command_spec(instruction: str) -> tuple[str, str]:
-    """根据自然语言指令生成（命令, 解释）二元组。
-
-    会把当前操作系统类型告诉 LLM，让它生成对应平台可直接执行的单条命令。
-    """
-    # 把当前 OS 信息拼到 prompt 里，避免 mac/linux/windows 命令混用
-    current_os = platform.system() + " " + platform.release() + " " + platform.machine()
-    prompt = (
-        f"根据以下用户指令生成在 {current_os} 环境下可直接执行的单条 shell 命令。\n"
-        f"严格按以下两行格式输出，不要 markdown、不要多余内容：\n"
-        f"命令：<shell command>\n"
-        f"说明：<一句话解释它做什么>\n\n"
-        f"用户指令：{instruction}"
-    )
-    resp = model.invoke(prompt)
-    text = resp.content if hasattr(resp, "content") else str(resp)
-
-    command = ""
-    explanation = ""
-    # 逐行扫描；同时兼容中文和英文冒号
-    for line in text.splitlines():
-        stripped = line.strip()
-        for prefix in ("命令：", "命令:"):
-            if stripped.startswith(prefix):
-                command = stripped[len(prefix):].strip()
-                break
-        for prefix in ("说明：", "说明:"):
-            if stripped.startswith(prefix):
-                explanation = stripped[len(prefix):].strip()
-                break
-    # 兜底：如果两行格式都没匹配上，就把整段当成命令再清理一遍
-    command = _clean_command(command or text)
-    return command, explanation
 
 
 # 需要真实 TTY 的全屏/交互程序。bang 模式会继承 stdio；管道捕获模式会直接拒绝。
@@ -609,33 +610,39 @@ def execute_shell_command(
 
 
 # 单路 stdout/stderr 的文本上限；超出则截断并附说明，避免拖垮 LLM prompt 与 checkpoint
-_SHELL_OUTPUT_MAX_BYTES = int(os.environ.get("ASKANSWER_SHELL_OUTPUT_MAX_BYTES") or 64 * 1024)
+def _shell_output_max_bytes() -> int:
+    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
+    return _env_int("ASKANSWER_SHELL_OUTPUT_MAX_BYTES", 64 * 1024)
 
 
 def _truncate_stream(text: str, label: str) -> str:
     """对 shell 子进程单路输出做硬截断；命中上限时附带省略字符数提示。"""
-    if len(text) <= _SHELL_OUTPUT_MAX_BYTES:
+    if len(text) <= _shell_output_max_bytes():
         return text
-    omitted = len(text) - _SHELL_OUTPUT_MAX_BYTES
-    return f"{text[:_SHELL_OUTPUT_MAX_BYTES]}\n[{label} 已截断，省略 {omitted} 字符]"
+    omitted = len(text) - _shell_output_max_bytes()
+    return f"{text[:_shell_output_max_bytes()]}\n[{label} 已截断，省略 {omitted} 字符]"
 
 
 # 对外暴露的危险检查别名（_react_internals 与 cli 都会用到）
 check_dangerous = _check_dangerous
+clean_command = _clean_command
 
 
 @tool
-def gen_shell_commands_run(instruction: str) -> str:
+def gen_shell_commands_run(command: str, explanation: str = "", instruction: str = "") -> str:
     """
-    根据用户指令生成并执行 shell 命令。
+    在用户确认后执行一条 shell 命令。
+    参数 command：要执行的单条命令，请按当前操作系统直接写好（不要 markdown、不要 $ 提示符）；
+    参数 explanation：一句话说明这条命令做什么；
+    参数 instruction：用户的原始自然语言诉求（用于确认界面展示）。
     高风险操作（rm、shutdown、重定向覆盖等）会被自动拦截；
     执行前会暂停图流程，向用户展示命令与说明，用户确认后才真正执行。
     """
-    # 正常情况下，此工具的 tool_call 会被 tools_node 拦截并走人机确认流程；
+    # 正常情况下，此工具的 tool_call 会被 react 子图拦截并走人机确认流程；
     # 这里仅作为“脱离图流程被直接调用”时的兜底，不自动执行、要求使用图入口。
-    command, explanation = gen_shell_command_spec(instruction)
+    command = clean_command(command or "")
     if not command:
-        return "未能生成有效的 shell 命令"
+        return "未提供有效的 shell 命令"
     danger = check_dangerous(command)
     if danger:
         return f"已拦截高风险命令（{danger}）：{command}"
@@ -643,6 +650,12 @@ def gen_shell_commands_run(instruction: str) -> str:
         "此工具需在图流程中运行以获得用户确认。\n"
         f"拟执行命令：{command}\n说明：{explanation or '(无)'}"
     )
+
+
+# 让模型知道该为哪个平台写命令（只读 platform，不触碰环境变量/网络）。
+gen_shell_commands_run.description += (
+    f"\n当前操作系统：{platform.system()} {platform.release()} {platform.machine()}"
+)
 
 # 工具集合（旧式 list 形式），仍保留以便外部直接 import；新增工具优先通过 registry 注册
 tools = [

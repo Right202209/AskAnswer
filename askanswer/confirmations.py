@@ -25,9 +25,9 @@ from typing import Any
 
 from .tools import (
     check_dangerous,
+    clean_command,
     describe_write,
     execute_shell_command,
-    gen_shell_command_spec,
     validate_write_path,
 )
 
@@ -107,20 +107,14 @@ class ShellConfirmation:
     clazz = "shell"
 
     def plan(self, tool_call: dict) -> dict:
-        # 工具入参里取自然语言指令；instruction 优先，input 兜底
+        # 命令由 answer 节点的主模型直接写在 tool_call 参数里；规划阶段只做清洗，
+        # 不再在工具/确认层额外调用一次 LLM 生成命令（架构文档 P8）。
         args = tool_call.get("args") or {}
-        instruction = (args.get("instruction") or args.get("input") or "").strip()
-        if not instruction:
-            return {"command": "", "explanation": "未提供 shell 指令", "instruction": ""}
-        try:
-            command, explanation = gen_shell_command_spec(instruction)
-        except Exception as exc:
-            # 生成失败也返回结构化 payload，让 gate 据此拦截并给出友好错误
-            return {
-                "command": "",
-                "explanation": f"生成 shell 命令失败：{exc}",
-                "instruction": instruction,
-            }
+        command = clean_command(str(args.get("command") or ""))
+        explanation = str(args.get("explanation") or "").strip()
+        instruction = str(args.get("instruction") or args.get("input") or "").strip()
+        if not command:
+            explanation = explanation or "未提供 shell 命令"
         return {"command": command, "explanation": explanation, "instruction": instruction}
 
     def gate(self, payload: dict) -> str | None:

@@ -26,6 +26,8 @@ CHAT_STARTERS = (
 
 class ChatHandler:
     name = "chat"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "闲聊、常识性问题，或你已知可直接回答、不需要联网"
     priority = 40
     bundle_tags = frozenset({"chat"})
     max_retries = 0

@@ -3,16 +3,32 @@
 #   /model 切换时只替换 proxy 内部的 backend，所有引用自动指向新模型。
 # - 同时初始化 Tavily 搜索客户端、读取 OpenWeather Key 等运行时常量。
 import os
+from threading import Lock
 
 from langchain.chat_models import init_chat_model
-from tavily import TavilyClient
 
 from .audit import with_llm_audit_callback
 from .settings import bootstrap_environ
 
 # 配置优先级（高 → 低）：进程已有 env > settings.json 分层 > .env 保底。
 # 详见 askanswer/settings.py::bootstrap_environ。
-bootstrap_environ()
+#
+# 导入本模块不再改写 os.environ（架构文档 P1/P3）：入口（CLI / HTTP / MCP server）
+# 显式调用 ``ensure_environ()``；作为库使用时，首次真正构造模型/客户端前也会兜底调用。
+_environ_lock = Lock()
+_environ_loaded = False
+
+
+def ensure_environ() -> None:
+    """幂等地装载 .env + settings.json 分层配置到进程环境变量。"""
+    global _environ_loaded
+    if _environ_loaded:
+        return
+    with _environ_lock:
+        if _environ_loaded:
+            return
+        bootstrap_environ()
+        _environ_loaded = True
 
 
 # init_chat_model 默认参数：不开启采样、最多重试 3 次、单次超时 120 秒。
@@ -66,10 +82,19 @@ class _ModelProxy:
         object.__setattr__(self, "_spec", spec)
         object.__setattr__(self, "_provider", provider)
 
+    def _ensure_spec(self) -> None:
+        # 默认模型标签也惰性解析：要等 ensure_environ() 之后 ASKANSWER_DEFAULT_MODEL 才可信
+        if self._spec is None:
+            ensure_environ()
+            spec, provider = _initial_model()
+            object.__setattr__(self, "_spec", spec)
+            object.__setattr__(self, "_provider", provider)
+
     def _ensure_inner(self):
         # 惰性构造：首次真正调用模型时才 init_chat_model。
         # 约束：`import askanswer.*` 不得要求 OPENAI_API_KEY（spec §5 冒烟矩阵第 1 项）。
         if self._inner is None:
+            self._ensure_spec()
             object.__setattr__(
                 self, "_inner", _build_model(self._spec, provider=self._provider)
             )
@@ -99,7 +124,12 @@ class _ModelProxy:
 
     def __repr__(self):
         # 调试时清楚地看到当前实际使用的 provider:spec
-        return f"<ModelProxy {self._provider}:{self._spec}>"
+        return f"<ModelProxy {self.label}>"
+
+    @property
+    def label(self) -> str:
+        self._ensure_spec()
+        return f"{self._provider}:{self._spec}"
 
 
 class _AuditedRunnable:
@@ -177,12 +207,10 @@ def _initial_model() -> tuple[str, str]:
     return (raw or "gpt-5.4"), "openai"
 
 
-_INITIAL_SPEC, _INITIAL_PROVIDER = _initial_model()
-
 # 模块级单例：所有节点 / 工具都直接 `from .load import model` 使用它。
-# inner=None → 惰性构造：首次调用（invoke/stream/bind_tools…）时才建模型，
-# 使得纯导入（`--graph`、测试、helix_mcp）无需 OPENAI_API_KEY。
-model = _ModelProxy(None, _INITIAL_SPEC, _INITIAL_PROVIDER)
+# inner/spec 均为 None → 惰性构造：首次调用（invoke/stream/bind_tools…）时才解析
+# 默认模型并建模型，使得纯导入（`--graph`、测试、helix_mcp）不读配置、无需 API key。
+model = _ModelProxy(None, None, None)
 
 
 def set_model(spec: str, **kwargs) -> str:
@@ -204,7 +232,7 @@ def set_model(spec: str, **kwargs) -> str:
 
 def current_model_label() -> str:
     """返回当前活跃模型的可读标签（用于状态展示等场景）。"""
-    return f"{model._provider}:{model._spec}"
+    return model.label
 
 
 def raw_backend():
@@ -218,8 +246,20 @@ def raw_backend():
     return model._ensure_inner()
 
 
-# Tavily 联网搜索客户端：tavily_search 工具会调用它
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+_tavily_client = None
 
-# OpenWeather API Key：check_weather 工具按需读取，未配置时给出友好提示
-openweather_api_key = os.getenv("OPENWEATHER_API_KEY")
+
+def get_tavily_client():
+    """惰性构造 Tavily 客户端：导入本模块不建任何外部客户端（架构文档 P1）。"""
+    global _tavily_client
+    if _tavily_client is None:
+        from tavily import TavilyClient
+
+        ensure_environ()
+        _tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+    return _tavily_client
+
+
+def openweather_api_key() -> str | None:
+    """按需读取 OpenWeather Key，未配置时 check_weather 给出友好提示。"""
+    return os.getenv("OPENWEATHER_API_KEY")

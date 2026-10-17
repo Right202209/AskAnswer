@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from langchain_core.messages import SystemMessage
+from pydantic import BaseModel, Field
 
 from ..routing import ROLE_EVALUATE, model_for
 from ..state import SearchState
 from .base import EvaluationResult, IntentClassification, latest_tool_message, pass_result
+
+
+class SearchVerdict(BaseModel):
+    """search 答案评估的结构化结果。"""
+
+    decision: Literal["pass", "re_search"] = Field(
+        description="答案足够好填 pass；需要换关键词重新搜索填 re_search"
+    )
+    new_search_query: str = Field(
+        default="", description="decision=re_search 时给出更精准的新搜索词，否则留空"
+    )
+
 
 SEARCH_KEYWORDS = (
     "联网",
@@ -43,6 +58,8 @@ SEARCH_KEYWORDS = (
 
 class SearchHandler:
     name = "search"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "需要联网搜索获取实时、最新或不确定的信息"
     priority = 30
     bundle_tags = frozenset({"search"})
     max_retries = 2
@@ -71,25 +88,27 @@ class SearchHandler:
         if tool_message is not None:
             search_results = str(getattr(tool_message, "content", "") or search_results)
 
-        prompt = f"""请评估当前答案是否足够好。
-    用户问题：{state.get('user_query', '')}
-    当前搜索词：{state.get('search_query', '')}
-    当前搜索结果：{search_results}
-    当前答案：{final_answer}
-
-    如果答案已经足够好，请严格输出：
-    评分：pass
-    新搜索词：
-
-    如果答案不够好，需要重新搜索，请严格输出：
-    评分：re_search
-    新搜索词：[更精准的新搜索词]
-    """
-        response = model_for(ROLE_EVALUATE).invoke([SystemMessage(content=prompt)])
-        response_text = str(response.content or "")
-        if "评分：re_search" not in response_text or "新搜索词：" not in response_text:
+        prompt = (
+            "请评估当前答案是否足够好；如果不够好，给出一个更精准的新搜索词。\n"
+            f"用户问题：{state.get('user_query', '')}\n"
+            f"当前搜索词：{state.get('search_query', '')}\n"
+            f"当前搜索结果：{search_results}\n"
+            f"当前答案：{final_answer}"
+        )
+        # 结构化输出代替在文本里找“评分：xxx”（架构文档 P7）：模型换个说法不会让判断失效
+        try:
+            verdict = (
+                model_for(ROLE_EVALUATE)
+                .with_structured_output(SearchVerdict)
+                .invoke([SystemMessage(content=prompt)])
+            )
+        except Exception:
+            return pass_result("evaluation failed; keep current answer")
+        if not isinstance(verdict, SearchVerdict):
+            verdict = SearchVerdict.model_validate(verdict)
+        if verdict.decision != "re_search":
             return pass_result("evaluation passed")
-        new_search_query = response_text.split("新搜索词：", 1)[1].strip()
+        new_search_query = verdict.new_search_query.strip()
         if not new_search_query:
             return pass_result("retry requested without query")
         current = str(state.get("search_query", "") or "").strip()

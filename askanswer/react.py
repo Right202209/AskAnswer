@@ -4,7 +4,9 @@
 from langgraph.graph import END, START, StateGraph
 
 from ._react_internals import (
+    _ask_approval_node,
     _confirm_plan_node,
+    _route_after_approval,
     _route_from_answer,
     _tools_node,
 )
@@ -29,7 +31,9 @@ def build_react_subgraph():
     builder.add_node("answer", _answer_node)
     # confirm_plan 节点：在执行需要确认的工具前按确认类规划动作并写入 pending_confirmations
     builder.add_node("confirm_plan", _confirm_plan_node)
-    # tools 节点：分发普通工具调用与需要确认的工具调用
+    # ask_approval 节点：一次只 interrupt 询问一个确认项，只读写 state、无副作用
+    builder.add_node("ask_approval", _ask_approval_node)
+    # tools 节点：执行普通工具 + 按已记录的决定执行确认类工具（绝不 interrupt）
     builder.add_node("tools", _tools_node)
 
     # 入口先过 clarify，再进 answer
@@ -41,8 +45,14 @@ def build_react_subgraph():
         _route_from_answer,
         {"confirm_plan": "confirm_plan", "tools": "tools", END: END},
     )
-    # 规划完动作后必然进入 tools 执行（其内部可能 interrupt 等待用户确认）
-    builder.add_edge("confirm_plan", "tools")
+    # 规划完动作后逐项询问；全部有了决定才进入 tools 执行。
+    # 把 interrupt 与副作用放在不同节点，恢复时重跑 ask_approval 不会重复执行任何工具。
+    builder.add_edge("confirm_plan", "ask_approval")
+    builder.add_conditional_edges(
+        "ask_approval",
+        _route_after_approval,
+        {"ask_approval": "ask_approval", "tools": "tools"},
+    )
     # 工具执行完总是回到 answer，由 LLM 决定继续调用工具还是输出最终回答
     builder.add_edge("tools", "answer")
     return builder.compile()

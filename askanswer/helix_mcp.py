@@ -45,6 +45,9 @@ def helix_spec_loop(topic: str) -> str:
 
 def main() -> None:
     """以 stdio 传输启动 MCP server（默认传输，最通用）。"""
+    from .load import ensure_environ
+
+    ensure_environ()  # 入口处显式装载 .env + settings.json
     mcp_server.run(transport="stdio")
 
 

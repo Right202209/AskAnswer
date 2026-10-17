@@ -219,3 +219,30 @@ def test_bool_and_number_stringify():
     env = settings.expand_to_env({"mcp_all_intents": False, "run_token_budget": 0})
     assert env["ASKANSWER_MCP_ALL_INTENTS"] == "0"
     assert env["ASKANSWER_RUN_TOKEN_BUDGET"] == "0"
+
+
+# ── P1/P3：导入不改写环境变量；入口显式 ensure_environ() 才装载 ─────────────
+
+def test_import_does_not_touch_environ(tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"env": {"ASKANSWER_PROBE_VAR": "from-settings"}}))
+    code = (
+        "import os, sys\n"
+        "import askanswer.load, askanswer.graph, askanswer.registry, askanswer.tools\n"
+        "before = os.environ.get('ASKANSWER_PROBE_VAR')\n"
+        "askanswer.load.ensure_environ()\n"
+        "after = os.environ.get('ASKANSWER_PROBE_VAR')\n"
+        "sys.exit(0 if (before is None and after == 'from-settings') else 1)\n"
+    )
+    env = {"PATH": os.environ.get("PATH", ""), "ASKANSWER_SETTINGS": str(settings),
+           "HOME": os.environ.get("HOME", str(tmp_path)),
+           "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr[-800:]

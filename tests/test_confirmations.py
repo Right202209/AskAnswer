@@ -52,7 +52,7 @@ def test_fs_write_plan_rejects_sensitive_paths(path):
 
 def test_fs_write_plan_rejects_oversize(monkeypatch, tmp_path):
     # 把上限压到 10 字节，写 11 字节应被拒
-    monkeypatch.setattr("askanswer.tools._WRITE_FILE_MAX_BYTES", 10)
+    monkeypatch.setenv("ASKANSWER_WRITE_FILE_MAX_BYTES", "10")
     handler = C.FsWriteConfirmation()
     payload = handler.plan(
         {"name": "write_file", "args": {"path": str(tmp_path / "f.txt"), "content": "x" * 11}}
@@ -184,7 +184,7 @@ def test_fs_write_rejects_sensitive_paths(path):
 
 
 def test_fs_write_rejects_oversize(tmp_path):
-    big = "x" * (tools._WRITE_FILE_MAX_BYTES + 1)
+    big = "x" * (tools._write_file_max_bytes() + 1)
     assert tools.validate_write_path(str(tmp_path / "big.txt"), big) is not None
 
 
@@ -252,3 +252,36 @@ def test_paid_api_audit_paths_redacted():
     )
     assert outcome.approved is False
     assert outcome.audit_args["args"]["secret"] == "***"
+
+
+# ── P8：确认规划不调用 LLM，命令直接取自 tool_call 参数 ─────────────────
+
+def test_shell_plan_uses_command_arg_without_llm(monkeypatch):
+    from askanswer import routing
+    from askanswer.confirmations import ShellConfirmation
+
+    def _boom(*a, **k):
+        raise AssertionError("plan 不应调用模型")
+
+    monkeypatch.setattr(routing, "model_for", _boom)
+    payload = ShellConfirmation().plan(
+        {"args": {"command": "```\n$ ls -la\n```", "explanation": "列目录", "instruction": "看看"}}
+    )
+    assert payload == {"command": "ls -la", "explanation": "列目录", "instruction": "看看"}
+
+
+def test_shell_plan_without_command_is_gated():
+    from askanswer.confirmations import ShellConfirmation
+
+    handler = ShellConfirmation()
+    payload = handler.plan({"args": {"instruction": "删点东西"}})
+    assert payload["command"] == ""
+    assert handler.gate(payload)
+
+
+def test_read_file_returns_content_without_llm(tmp_path):
+    from askanswer.tools import read_file
+
+    f = tmp_path / "a.txt"
+    f.write_text("hello world", encoding="utf-8")
+    assert "hello world" in read_file.invoke({"path": str(f)})

@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import json
 
-from ..tools import gen_shell_command_spec
 from ..ui_select import is_interactive, select_option
+from .shell_assist import gen_shell_command_spec
 from .text import _truncate
 from .theme import C
 

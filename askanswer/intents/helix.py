@@ -110,6 +110,8 @@ def _looks_ambiguous(text: str) -> bool:
 
 class HelixHandler:
     name = "helix"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "需求模糊、不具体（“想做一个 X”但缺乏关键约束、受众、验收标准），需要先苏格拉底式澄清再动手；包含 spec-first / 需求澄清 / 苏格拉底等关键字时也属于此类"
     # 介于 sql(20) 与 math(25) 之间：更具体的 SQL/文件意图先匹配，落到这里前还能
     # 兜住 chat / search 这些更宽泛的 fallback。
     priority = 22

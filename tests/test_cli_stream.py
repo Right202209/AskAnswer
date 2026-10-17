@@ -36,7 +36,7 @@ class _FakeApp:
 
 
 def _token(text: str) -> tuple[str, tuple]:
-    return ("messages", (AIMessageChunk(content=text), {}))
+    return ("messages", (AIMessageChunk(content=text), {"langgraph_node": "answer"}))
 
 
 def _tool_plan() -> tuple[str, tuple]:
@@ -168,3 +168,18 @@ def test_stream_query_prompts_confirmation_then_resumes(monkeypatch):
     assert seen["payload"] == payload
     assert result == "done"
     assert len(app.stream_calls) == 2  # 一腿到 interrupt，resume 后再一腿
+
+
+def test_stream_leg_drops_tokens_from_non_answer_nodes():
+    """P12：分类/评估模型的 token 不能被当作答案流出。"""
+    from askanswer import runner
+
+    tracker = runner._LegTracker()
+    leaked = list(runner._message_events(
+        (AIMessageChunk(content="评分：pass"), {"langgraph_node": "sorcery"}), tracker,
+    ))
+    assert leaked == []
+    kept = list(runner._message_events(
+        (AIMessageChunk(content="hi"), {"langgraph_node": "answer"}), tracker,
+    ))
+    assert [e.text for e in kept] == ["hi"]

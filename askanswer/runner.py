@@ -33,6 +33,9 @@ EVENT_FINAL = "final"
 
 # final_answer 可能出现在这两个父图节点的 update 里（与 cli._on_node_update 口径一致）。
 _ANSWER_NODES = frozenset({"answer", "sorcery"})
+# 只有这些节点产生的 LLM token 才会作为答案流式输出（架构文档 P12 / D10）。
+# understand 的分类模型、sorcery 的评估模型、子图工具内部的模型 token 一律不外流。
+STREAM_TOKEN_NODES = frozenset({"answer"})
 # thread_meta.preview 的截断长度（与 cli.stream_query 的 80 字符口径一致）。
 PREVIEW_MAX_CHARS = 80
 
@@ -145,8 +148,10 @@ def _message_events(payload, tracker: _LegTracker) -> Iterator[RunEvent]:
     """messages 通道 → token / tool 事件（口径同 cli._handle_message_chunk）。"""
     if not isinstance(payload, tuple) or len(payload) != 2:
         return
-    msg = payload[0]
+    msg, metadata = payload
     if not isinstance(msg, AIMessageChunk):
+        return
+    if not _is_answer_token(metadata):
         return
     if getattr(msg, "tool_call_chunks", None):
         if not tracker.in_tool:  # 每个规划阶段只发一次 tool 事件
@@ -173,6 +178,16 @@ def _update_events(payload, tracker: _LegTracker) -> Iterator[RunEvent]:
         yield RunEvent(
             kind=EVENT_NODE, node=node, data=update, elapsed=tracker.elapsed(),
         )
+
+
+def _is_answer_token(metadata) -> bool:
+    """按 ``langgraph_node`` 过滤：没有该元数据时（旧版本/测试替身）保持放行。"""
+    if not isinstance(metadata, dict):
+        return True
+    node = metadata.get("langgraph_node")
+    if not node:
+        return True
+    return node in STREAM_TOKEN_NODES
 
 
 def _tool_names(msg) -> dict:

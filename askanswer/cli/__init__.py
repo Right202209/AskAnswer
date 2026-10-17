@@ -47,7 +47,11 @@ __all__ = [
 
 
 def main() -> int:
-    """CLI 程序入口：解析参数 → 注册 atexit → 进入对应模式。"""
+    """CLI 程序入口：装载配置 → 解析参数 → 注册 atexit → 进入对应模式。"""
+    # 入口处显式装载 .env + settings.json（导入任何 askanswer 模块都不会这么做）
+    from ..load import ensure_environ
+
+    ensure_environ()
     parser = build_parser()
     args = parser.parse_args()
 

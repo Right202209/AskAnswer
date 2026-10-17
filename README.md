@@ -271,7 +271,7 @@ askanswer/
 ├── cli/                 # REPL 包：app / stream / repl / confirm / render / commands/*
 ├── graph.py             # 父图：understand → answer(react) → sorcery
 ├── react.py             # react 子图拓扑（clarify → answer ⇄ tools / confirm_plan）
-├── _react_internals.py  # answer / tools / confirm_plan 节点实现
+├── _react_internals.py  # tools / confirm_plan / ask_approval 节点实现
 ├── clarify.py           # 意图澄清 interrupt
 ├── confirmations.py     # HITL 确认协议（shell / fs_write / external_api_paid）
 ├── nodes.py             # 父图节点：意图识别、自评回写
@@ -296,13 +296,13 @@ START → understand → answer(react) → sorcery → {answer 重跑 | END}
 
 react 子图:
   START → clarify → answer ⇄ tools
-                      └→ confirm_plan → tools
+                      └→ confirm_plan → ask_approval ⟲ → tools
 ```
 
 - **understand**：本地分类器优先（关键词/正则，handler 按 priority），歧义时才调 LLM；提取路径或搜索词
 - **clarify**：仅首轮（`step == "understood"`）；handler 可选提问，默认无开销透传
 - **answer**：按 `intent` 选系统提示与工具集（`registry.list(tags=…)`）；每轮 `_reclassify_intent` 支持中途换话题
-- **tools / confirm_plan**：普通工具直接跑；需确认的先 `plan` 写入 `pending_confirmations`，再 `interrupt()` 等人批准
+- **confirm_plan → ask_approval → tools**：需确认的调用先 `plan` 写入 `pending_confirmations`；`ask_approval` 每次只 `interrupt()` 询问一项并把决定写回 state（无副作用，可安全重跑）；全部决定后 `tools` 一次性执行普通工具与已批准的动作（不 interrupt，`apply` 内二次校验）。恢复时不会重复执行任何工具
 - **sorcery**：委托 `handler.evaluate`；重试预算按意图（search=2，sql/file_read=1，chat/math/helix/research/decision=0）
 
 ## 意图与工具

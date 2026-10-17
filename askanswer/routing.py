@@ -106,6 +106,9 @@ _router: ModelRouter | None = None
 def get_router() -> ModelRouter:
     global _router
     if _router is None:
+        from .load import ensure_environ
+
+        ensure_environ()  # 路由表来自环境变量：首次构建前确保配置已装载
         _router = ModelRouter({role: _route_from_env(role) for role in ROLES})
     return _router
 

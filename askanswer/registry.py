@@ -46,12 +46,50 @@ _SHELL_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, "shell"})
 # math/search 等更具体的流程被 prompt 注入诱导调用付费/写副作用 API。
 # 用户如确认要在所有 intent 下使用 MCP，可设环境变量
 # ASKANSWER_MCP_ALL_INTENTS=1 重新放开（兼容旧行为）。
-if (os.environ.get("ASKANSWER_MCP_ALL_INTENTS") or "").strip().lower() in {"1", "true", "yes"}:
-    _MCP_TAGS = ALL_INTENT_TAGS | frozenset({"mcp", "external_api"})
-else:
-    _MCP_TAGS = frozenset({TAG_CHAT, "mcp", "external_api"})
+# 运行时读取（而非导入时固化），保证 settings.json 注入的值也能生效（P1/P3）。
+def _mcp_tags() -> frozenset[str]:
+    if (os.environ.get("ASKANSWER_MCP_ALL_INTENTS") or "").strip().lower() in {"1", "true", "yes"}:
+        return ALL_INTENT_TAGS | frozenset({"mcp", "external_api"})
+    return frozenset({TAG_CHAT, "mcp", "external_api"})
 
 ConfirmationClass = Literal["none", "shell", "fs_write", "external_api_paid"]
+
+# ── 风险等级与能力（架构文档 P13 / §7） ─────────────────────────────────
+# tags 回答「哪个 intent 能看到这个工具」；risk/capability 回答「这个工具能做什么、
+# 有多危险」。权限语义不再靠工具名或技能名的字符串相等来推断。
+Risk = Literal["read", "network", "write", "exec", "paid", "external"]
+RISK_READ: Risk = "read"            # 只读本地
+RISK_NETWORK: Risk = "network"      # 只读网络（必须有超时）
+RISK_WRITE: Risk = "write"          # 写本地文件
+RISK_EXEC: Risk = "exec"            # 执行命令
+RISK_PAID: Risk = "paid"            # 付费外部 API
+RISK_EXTERNAL: Risk = "external"    # 第三方 MCP
+# 这三类有副作用：注册时必须声明确认类，否则拒绝注册（不可绕过的不变量）
+RISKS_REQUIRING_APPROVAL = frozenset({RISK_WRITE, RISK_EXEC, RISK_PAID})
+
+CAP_UTIL = "util"
+CAP_NET_LOOKUP = "net.lookup"
+CAP_WEB_SEARCH = "web.search"
+CAP_FS_READ = "fs.read"
+CAP_FS_WRITE = "fs.write"
+CAP_EXEC_SHELL = "exec.shell"
+CAP_DATA_SQL = "data.sql"
+CAP_AGENT_SPEC = "agent.spec"
+CAP_AGENT_RESEARCH = "agent.research"
+CAP_AGENT_DECISION = "agent.decision"
+CAP_MCP = "mcp"
+
+# 用户可通过环境变量（或 settings.json 映射出的同名变量）禁用任意工具，逗号分隔。
+_DENY_TOOLS_ENV = "ASKANSWER_DENY_TOOLS"
+
+
+class ToolRegistrationError(ValueError):
+    """工具描述符违反注册不变量（如高风险工具未声明确认类）。"""
+
+
+def denied_tool_names() -> frozenset[str]:
+    raw = os.environ.get(_DENY_TOOLS_ENV) or ""
+    return frozenset(item.strip() for item in raw.split(",") if item.strip())
 
 
 @dataclass(frozen=True)
@@ -64,6 +102,17 @@ class ToolDescriptor:
     source: str                       # "builtin" | "shell" | "sql" | "mcp:<server>"
     # 需要哪类人工确认；三类的规划/闸门/执行体都在 confirmations.py
     confirmation_class: ConfirmationClass = "none"
+    # 风险等级：write / exec / paid 必须配确认类
+    risk: Risk = RISK_READ
+    # 能力标签，如 fs.read / web.search；用于权限展示与按能力过滤
+    capability: str = CAP_UTIL
+
+    def __post_init__(self) -> None:
+        if self.risk in RISKS_REQUIRING_APPROVAL and self.confirmation_class == "none":
+            name = getattr(self.tool, "name", "?")
+            raise ToolRegistrationError(
+                f"工具 {name} 的风险等级为 {self.risk}，必须声明 confirmation_class"
+            )
 
     @property
     def bundles(self) -> frozenset[str]:
@@ -103,16 +152,35 @@ class ToolRegistry:
         bundle: str | None = None,
         *,
         tags: set[str] | frozenset[str] | None = None,
+        capabilities: set[str] | frozenset[str] | None = None,
     ) -> list[BaseTool]:
-        """列出所有工具；指定 tags/bundle 时只返回命中任一 tag 的工具。"""
+        """列出工具；指定 tags/bundle 时只返回命中任一 tag 的工具。
+
+        ``ASKANSWER_DENY_TOOLS`` 里列出的工具一律不返回（用户可关闭任何工具）。
+        """
+        return [d.tool for d in self.descriptors(bundle, tags=tags, capabilities=capabilities)]
+
+    def descriptors(
+        self,
+        bundle: str | None = None,
+        *,
+        tags: set[str] | frozenset[str] | None = None,
+        capabilities: set[str] | frozenset[str] | None = None,
+    ) -> list[ToolDescriptor]:
         with self._lock:
             descriptors = list(self._tools.values())
+        denied = denied_tool_names()
+        if denied:
+            descriptors = [d for d in descriptors if d.tool.name not in denied]
         if tags is None and bundle is not None:
             tags = frozenset({bundle})
-        if tags is None:
-            return [d.tool for d in descriptors]
-        wanted = frozenset(tags)
-        return [d.tool for d in descriptors if d.tags & wanted]
+        if tags is not None:
+            wanted = frozenset(tags)
+            descriptors = [d for d in descriptors if d.tags & wanted]
+        if capabilities is not None:
+            caps = frozenset(capabilities)
+            descriptors = [d for d in descriptors if d.capability in caps]
+        return descriptors
 
     def names(self, bundle: str | None = None) -> set[str]:
         return {t.name for t in self.list(bundle)}
@@ -166,8 +234,10 @@ class ToolRegistry:
             self.register(
                 ToolDescriptor(
                     tool=wrapped,
-                    tags=_MCP_TAGS,
+                    tags=_mcp_tags(),
                     source=f"mcp:{spec.get('server', 'unknown')}",
+                    risk=RISK_EXTERNAL,
+                    capability=CAP_MCP,
                 )
             )
 
@@ -210,20 +280,23 @@ def _seed_builtin(registry: ToolRegistry) -> None:
         write_file,
     )
 
-    # 普通工具：所有 bundle 都可见
+    # 普通工具：所有 bundle 都可见；风险等级与能力逐个声明
     plain_tools = (
-        check_weather,
-        get_current_time,
-        calculate,
-        convert_currency,
-        lookup_ip,
-        pwd,
-        read_file,
-        tavily_search,
+        (check_weather, RISK_NETWORK, CAP_NET_LOOKUP),
+        (get_current_time, RISK_READ, CAP_UTIL),
+        (calculate, RISK_READ, CAP_UTIL),
+        (convert_currency, RISK_NETWORK, CAP_NET_LOOKUP),
+        (lookup_ip, RISK_NETWORK, CAP_NET_LOOKUP),
+        (pwd, RISK_READ, CAP_UTIL),
+        (read_file, RISK_READ, CAP_FS_READ),
+        (tavily_search, RISK_NETWORK, CAP_WEB_SEARCH),
     )
-    for tool in plain_tools:
+    for tool, risk, capability in plain_tools:
         registry.register(
-            ToolDescriptor(tool=tool, tags=_BUILTIN_TAGS, source="builtin")
+            ToolDescriptor(
+                tool=tool, tags=_BUILTIN_TAGS, source="builtin",
+                risk=risk, capability=capability,
+            )
         )
 
     # Shell 工具特殊：bundle 不含 sql + 需要人工确认
@@ -233,6 +306,8 @@ def _seed_builtin(registry: ToolRegistry) -> None:
             tags=_SHELL_TAGS,
             source="shell",
             confirmation_class="shell",
+            risk=RISK_EXEC,
+            capability=CAP_EXEC_SHELL,
         )
     )
 
@@ -244,6 +319,8 @@ def _seed_builtin(registry: ToolRegistry) -> None:
             tags=frozenset({TAG_CHAT, TAG_FILE, "fs_write"}),
             source="builtin",
             confirmation_class="fs_write",
+            risk=RISK_WRITE,
+            capability=CAP_FS_WRITE,
         )
     )
 
@@ -265,6 +342,8 @@ def _seed_sql(registry: ToolRegistry) -> None:
             tool=sql_query,
             tags=frozenset({TAG_CHAT, TAG_SQL, "sql_tool"}),
             source="sql",
+            risk=RISK_READ,
+            capability=CAP_DATA_SQL,
         )
     )
 
@@ -284,6 +363,8 @@ def _seed_helix(registry: ToolRegistry) -> None:
             tool=helix_spec_loop,
             tags=frozenset({TAG_CHAT, TAG_HELIX, "helix_tool"}),
             source="helix",
+            risk=RISK_READ,
+            capability=CAP_AGENT_SPEC,
         )
     )
 
@@ -303,6 +384,8 @@ def _seed_research(registry: ToolRegistry) -> None:
             tool=research_brief_loop,
             tags=frozenset({TAG_CHAT, TAG_RESEARCH, "research_tool"}),
             source="research",
+            risk=RISK_NETWORK,
+            capability=CAP_AGENT_RESEARCH,
         )
     )
 
@@ -322,6 +405,8 @@ def _seed_decision(registry: ToolRegistry) -> None:
             tool=decision_memo_loop,
             tags=frozenset({TAG_CHAT, TAG_DECISION, "decision_tool"}),
             source="decision",
+            risk=RISK_NETWORK,
+            capability=CAP_AGENT_DECISION,
         )
     )
 

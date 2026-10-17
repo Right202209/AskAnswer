@@ -144,3 +144,57 @@ def test_tool_tags_delegate_to_handler():
     tags = get_intent_registry().tool_tags("research")
     assert isinstance(tags, frozenset)
     assert "research" in tags
+
+
+# ── P5：分类提示由注册表生成；P7：search 评估走结构化输出 ─────────────────
+
+def test_classification_prompt_lists_every_registered_intent():
+    from askanswer.intents import get_intent_registry
+
+    registry = get_intent_registry()
+    prompt = registry.classification_prompt("随便问问")
+    for handler in registry.handlers():
+        assert f"- {handler.name}：" in prompt
+        assert handler.description in prompt
+
+
+def _search_state():
+    return {"user_query": "q", "search_query": "old", "final_answer": "a", "messages": []}
+
+
+class _FakeStructured:
+    def __init__(self, result):
+        self._result = result
+
+    def with_structured_output(self, schema):
+        return self
+
+    def invoke(self, messages):
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+def test_search_evaluate_structured_retry(monkeypatch):
+    from askanswer.intents import search
+
+    monkeypatch.setattr(search, "model_for", lambda role: _FakeStructured(
+        search.SearchVerdict(decision="re_search", new_search_query="better kw")
+    ))
+    result = search.SearchHandler().evaluate(_search_state())
+    assert result.decision == "retry"
+    assert result.retry_directive["search_query"] == "better kw"
+
+
+def test_search_evaluate_pass_and_duplicate_and_error(monkeypatch):
+    from askanswer.intents import search
+
+    handler = search.SearchHandler()
+    for verdict in (
+        search.SearchVerdict(decision="pass"),
+        search.SearchVerdict(decision="re_search", new_search_query="old"),
+        search.SearchVerdict(decision="re_search", new_search_query=""),
+        RuntimeError("model down"),
+    ):
+        monkeypatch.setattr(search, "model_for", lambda role, v=verdict: _FakeStructured(v))
+        assert handler.evaluate(_search_state()).decision == "pass"

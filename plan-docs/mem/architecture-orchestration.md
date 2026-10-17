@@ -35,3 +35,18 @@ The subgraph entry is `START → clarify → answer` (`clarify` lives in `askans
 ## Human-in-the-loop confirmations
 
 Two classes are wired today: `shell` (`gen_shell_commands_run`) and `fs_write` (`write_file_patch`). `_route_from_answer` sends any tool call whose class is in `_KNOWN_CONFIRM_CLASSES` to `_confirm_plan_node`, which dispatches per call: shell goes through `_plan_shell_call` → `gen_shell_command_spec` → `pending_shell`; fs_write goes through `_plan_fs_write_call` → `propose_file_write` (path validation + diff vs current file) → `pending_fs_write`. The plans are persisted by the parent checkpointer so replays after `interrupt()` don't re-call the LLM / re-read disk. `_tools_node` then calls the matching `_run_*_with_confirmation`, which raises `interrupt({"type": "confirm_shell" | "confirm_fs_write", ...})`. The CLI catches the interrupt in `stream_query`, dispatches via `_prompt_confirmation` to the per-class UI, and resumes with `Command(resume={"approve": bool, ...})`. Danger filters (`_DANGEROUS_PATTERNS` for shell, `check_fs_write_dangerous` for fs_write) run both before the prompt and after any user edit, and again right before execution.
+
+
+## HITL topology (2026-10 refactor, supersedes the paragraphs above)
+
+The react subgraph is now `answer → confirm_plan → ask_approval ⟲ → tools → answer`
+(plain-only turns go `answer → tools`). Rules:
+
+- `confirm_plan` plans every confirmable call into `pending_confirmations` (no LLM call; the
+  shell command comes straight from the tool_call `command` argument).
+- `ask_approval` handles **one** undecided item per run: runs `gate()`; a blocked item is stored
+  as `blocked`, otherwise `interrupt()` and the resume value is stored as `decision`. It has no
+  side effects, so LangGraph re-running it on resume is safe. It loops until no item is undecided.
+- `tools` executes plain tools via `ToolNode` and `apply()`s each confirmable call with its stored
+  decision (apply re-validates). It never interrupts. This fixes P9: plain tools and approved
+  actions used to run twice when a turn mixed them with an interrupt.

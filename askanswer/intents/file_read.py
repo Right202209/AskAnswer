@@ -31,6 +31,8 @@ FILE_READ_KEYWORDS = (
 
 class FileReadHandler:
     name = "file_read"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "要求读取或分析本地文件（通常会给出路径或文件名，如 /tmp/a.txt、./data.csv、report.md）"
     priority = 10
     bundle_tags = frozenset({"file_read"})
     max_retries = 1

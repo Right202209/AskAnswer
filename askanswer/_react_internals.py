@@ -184,12 +184,13 @@ def _tools_node(
             )
         )
 
-    # 需要确认的调用一条条走 HITL 流程（内部会 interrupt）
+    # 需要确认的调用：ask_approval 节点已逐条拿到用户决定并写入 state，
+    # 这里只按决定执行（apply 内部会二次校验），本节点绝不 interrupt。
     for tc in confirm_calls:
-        out_messages.append(_run_with_confirmation(tc, state))
+        out_messages.append(_apply_confirmation(tc, state))
 
-    # 执行完后清空规划缓存，避免下一轮被旧规划影响（pending_shell 是旧字段，一并清）
-    return {"messages": out_messages, "pending_confirmations": {}, "pending_shell": {}}
+    # 执行完后清空规划缓存，避免下一轮被旧规划影响
+    return {"messages": out_messages, "pending_confirmations": {}}
 
 
 def _route_from_answer(state: SearchState):
@@ -207,42 +208,88 @@ def _route_from_answer(state: SearchState):
     return "tools"
 
 
-# ── HITL helpers ─────────────────────────────────────────────────────
+# ── HITL：plan → ask（只 interrupt，无副作用）→ act（只执行，不 interrupt） ──
+#
+# 旧实现把「执行普通工具」和「interrupt 询问」放在同一个 tools 节点里：LangGraph
+# 恢复时会从节点开头重跑，导致同一条 AIMessage 里的普通工具被执行两次、多个确认
+# 项中前面已批准的动作也被重放（架构文档 P9）。现在拆成三段：
+#
+# * ``_confirm_plan_node``  规划，写 pending_confirmations（无副作用）
+# * ``_ask_approval_node``  每次只询问一个尚无决定的项，把决定写回 state；
+#                           被拦截的项直接记为 blocked，不打扰用户（无副作用）
+# * ``_tools_node``         执行普通工具 + 按已记录的决定 apply（不 interrupt）
 
-def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
-    """执行需要人工确认的工具调用：取出预规划动作、安全闸门、interrupt 询问、执行。
+_DECISION_KEY = "decision"
+_BLOCKED_KEY = "blocked"
 
-    具体的规划/闸门/执行逻辑由确认类 handler（``confirmations.py``）提供，这里
-    只负责通用编排与审计（kind 形如 ``shell_approve`` / ``fs_write_reject``）。
+
+def _undecided_ids(state: SearchState) -> list[str]:
+    """按 tool_call 顺序列出尚未拿到用户决定的确认项 id。"""
+    plans = state.get("pending_confirmations") or {}
+    last = state["messages"][-1]
+    ids: list[str] = []
+    for tc in getattr(last, "tool_calls", None) or []:
+        plan = plans.get(tc.get("id"))
+        if plan is None:
+            continue
+        if _DECISION_KEY in plan or _BLOCKED_KEY in plan:
+            continue
+        ids.append(tc["id"])
+    return ids
+
+
+def _ask_approval_node(state: SearchState) -> dict:
+    """一次只处理一个待确认项：先过安全闸门，未拦截才 interrupt 询问用户。
+
+    本节点只读写 state，没有任何外部副作用 —— 恢复时重跑是安全的。
     """
+    pending = _undecided_ids(state)
+    if not pending:
+        return {}
+    call_id = pending[0]
+    plans = dict(state.get("pending_confirmations") or {})
+    plan = dict(plans[call_id])
+    handler = get_confirmation_handler(plan.get("class"))
+    if handler is None:
+        plan[_BLOCKED_KEY] = f"未接入的确认类型：{plan.get('class')}"
+    else:
+        blocked = plan.get("error") or handler.gate(plan)
+        if blocked:
+            plan[_BLOCKED_KEY] = blocked
+        else:
+            # interrupt() 抛出后，父图 stream 看到 __interrupt__，CLI 按
+            # payload["type"]（confirm_<class>）弹出对应的确认 UI
+            plan[_DECISION_KEY] = interrupt(handler.interrupt_payload(plan))
+    plans[call_id] = plan
+    return {"pending_confirmations": plans}
+
+
+def _route_after_approval(state: SearchState) -> str:
+    """还有未决定的确认项就继续询问，全部决定后进入执行。"""
+    return "ask_approval" if _undecided_ids(state) else "tools"
+
+
+def _apply_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
+    """按 ask_approval 记录的决定执行一个确认类工具调用，并写审计。"""
     clazz = get_registry().confirmation_classes().get(tool_call["name"]) or "shell"
     handler = get_confirmation_handler(clazz)
     plans = state.get("pending_confirmations") or {}
-    # 兼容升级前挂起的旧 checkpoint：老版本只写 pending_shell（必为 shell 类）
-    payload = (
-        plans.get(tool_call["id"])
-        or (state.get("pending_shell") or {}).get(tool_call["id"])
-        or {}
-    )
-
-    # 弹确认框之前先过安全闸门（规划失败 / 危险命令等），命中直接拦截
-    blocked = payload.get("error") or handler.gate(payload)
-    if blocked:
+    payload = dict(plans.get(tool_call["id"]) or {})
+    blocked = payload.pop(_BLOCKED_KEY, None)
+    if blocked or _DECISION_KEY not in payload:
+        reason = blocked or payload.get("error") or "未获得用户确认，已跳过执行"
         log_event(
             kind=f"{clazz}_reject",
             tool_name=tool_call["name"],
             args_summary=summarize_args(handler.audit_args(payload)),
-            error=blocked,
+            error=reason,
         )
         return ToolMessage(
-            content=blocked,
+            content=reason,
             tool_call_id=tool_call["id"],
             name=tool_call["name"],
         )
-
-    # interrupt() 抛出后，父图的 stream 会看到 __interrupt__ 通道，CLI 按
-    # payload["type"]（confirm_<class>）弹出对应的确认 UI
-    decision = interrupt(handler.interrupt_payload(payload))
+    decision = payload.pop(_DECISION_KEY)
     # apply 内部会重新过安全闸门（用户可能编辑过内容），然后才真正执行
     started = time.monotonic()
     outcome = handler.apply(payload, decision, tool_call)

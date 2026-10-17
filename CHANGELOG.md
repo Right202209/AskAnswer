@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-17 · Architecture refactor batch 1（按《架构重构设计文档》P1–P14 修复，包名保持 askanswer）
+
+### Fixed
+- **P9 HITL 重复执行**：审批拆成 `confirm_plan → ask_approval → tools`。interrupt 所在节点无副作用，恢复后普通工具与已批准动作都只执行一次（`tests/test_hitl_resume.py`）。
+- **P6 进度提示污染历史**：understand / sorcery 不再往 `messages` 追加“识别为…”提示；收尾不再重复追加最终答案。
+- **P12 流式泄漏**：runner 只输出 `langgraph_node == "answer"` 的 token，分类/评估模型的输出不再混进答案。
+- **P10 网络无超时**：`check_weather`、`tavily_search` 显式超时。
+- **P11**：删除会话改用 `SqliteSaver.delete_thread`，不再按内部表名直删。
+- 依赖：`mcp<2`（2.x 移除了 `mcp.server.fastmcp`，导致 helix_mcp 导入失败）。
+
+### Changed
+- **P8 工具不调 LLM**：`read_file` 返回转换后的原文（超长截断）；`gen_shell_commands_run(command, explanation, instruction)` 由主模型直接给命令，确认规划不再生成命令。CLI 的“补充说明后重新生成”移到 `cli/shell_assist.py` 并走 `model_for`。
+- **P7**：search 评估改为结构化输出 `SearchVerdict`。
+- **P5**：每个 IntentHandler 声明 `description`，LLM 分类提示由注册表生成（此前漏了 research / decision）。
+- **P13**：`ToolDescriptor` 新增 `risk` / `capability`；write/exec/paid 工具未声明确认类无法注册；`ASKANSWER_DENY_TOOLS` 可禁用任意工具。
+- **P1/P3**：导入 `askanswer.*` 不再改写 `os.environ`；入口显式 `ensure_environ()`，模型/路由/Tavily 首次构造时兜底调用；工具限额改为运行时读取。
+
+
 ## 2026-07-16 · CLI interactive editors (nano / vim)
 
 ### Added

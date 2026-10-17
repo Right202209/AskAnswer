@@ -19,7 +19,7 @@ dependencies = [
     "pydantic>=2.7",  # structured outputs (intents/base, helix, decision, research, registry)
 
     # --- Tools & protocols ---
-    "mcp",  # MCP client (mcp.py) + helix FastMCP server (helix_mcp.py)
+    "mcp>=1.0,<2",  # MCP client (mcp.py) + helix FastMCP server；mcp 2.x 移除了 mcp.server.fastmcp
     "tavily-python",  # web search client (load.py → TavilyClient)
     "markitdown",  # read_file document conversion (tools.py)
 

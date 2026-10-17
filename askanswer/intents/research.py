@@ -51,6 +51,8 @@ RESEARCH_KEYWORDS_CN = (
 
 class ResearchHandler:
     name = "research"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "需要围绕一个主题做多来源调研并产出研究简报（不是单个事实查询）"
     # 介于 search(30) 之前：比泛化 search 更具体，落到这里前仍让 sql/file_read/helix
     # 等更精准的 handler 优先匹配。
     priority = 28

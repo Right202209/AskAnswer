@@ -101,6 +101,11 @@ def _render_node_update(
     elif node == "clarify":
         # 只有真的澄清出结果（update 非空）才打标记；空 update 在 _on_node_update 已拦截。
         print(_marker("Clarify", _clarify_detail(update), elapsed))
+    elif node == "ask_approval":
+        plans = update.get("pending_confirmations") or {}
+        blocked = sum(1 for p in plans.values() if isinstance(p, dict) and p.get("blocked"))
+        detail = f"拦截 {blocked} 项" if blocked else "已记录决定"
+        print(_marker("Approve", detail, elapsed))
     elif node in ("confirm_plan", "shell_plan"):
         plans = update.get("pending_confirmations") or update.get("pending_shell") or {}
         detail = f"规划 {len(plans)} 项确认" if plans else "规划完成"

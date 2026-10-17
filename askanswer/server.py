@@ -264,6 +264,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"绑定地址（默认 {DEFAULT_HOST}，仅本机）")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"监听端口（默认 {DEFAULT_PORT}）")
     args = parser.parse_args(argv)
+    from .load import ensure_environ
+
+    ensure_environ()  # 入口处显式装载 .env + settings.json
     if args.host not in LOCAL_HOSTS and not os.getenv(TOKEN_ENV):
         _LOG.warning("绑定非本机地址 %s 且未设置 %s：任何能访问该端口的人都可调用图。", args.host, TOKEN_ENV)
     server = ThreadingHTTPServer((args.host, args.port), AskAnswerHandler)

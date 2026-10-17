@@ -73,6 +73,26 @@ class IntentRegistry:
     def llm_intent_list(self) -> str:
         return "|".join(self.names())
 
+    def classification_prompt(self, user_message: str) -> str:
+        """LLM 分类提示：候选清单与描述全部来自已注册的 handler（架构文档 P5）。
+
+        新增 intent 只需注册带 ``description`` 的 handler，不用改 understand 节点。
+        """
+        lines = [
+            f"- {handler.name}：{getattr(handler, 'description', '') or handler.name}"
+            for handler in self.handlers()
+        ]
+        return (
+            f'分析用户的查询："{user_message}"\n\n'
+            "请判断用户意图属于以下哪一类：\n"
+            + "\n".join(lines)
+            + "\n\n"
+            f"intent 必须是这些值之一：{self.llm_intent_list()}。\n"
+            "file_path 仅 file_read 时填写具体路径，否则为空字符串。\n"
+            "search_query 仅 search 时填写最佳关键词，否则为空字符串。\n"
+            "understanding 填写对用户需求的简要总结。"
+        )
+
     def _fallback_classification(self, text: str) -> IntentClassification:
         lowered = text.lower()
         file_path = extract_file_path(text)

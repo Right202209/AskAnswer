@@ -4,7 +4,7 @@
 
 import os
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 
 from .audit import log_event, run_usage_so_far
 from .intents import get_intent_registry
@@ -36,25 +36,7 @@ def _normalize_intent(fields: dict, user_message: str) -> dict:
 
 def _intent_from_llm(user_message: str) -> dict:
     """调用 LLM 做意图分类，使用结构化输出约束字段。"""
-    registry = get_intent_registry()
-    intent_list = registry.llm_intent_list()
-    prompt = (
-        f'分析用户的查询："{user_message}"\n\n'
-        "请判断用户意图属于以下哪一类：\n"
-        "- file_read：要求读取或分析本地文件（通常会给出路径或文件名，"
-        "如 /tmp/a.txt、./data.csv、report.md）\n"
-        "- sql：要求查询数据库、编写 SQL、分析表结构、统计数据库数据\n"
-        "- math：明确要求数学表达式计算\n"
-        "- helix：用户给出的需求模糊、不具体（“想做一个 X”但 X 缺乏关键约束、"
-        "受众、验收标准），需要先苏格拉底式澄清再动手；包含 spec-first / "
-        "需求澄清 / 苏格拉底等关键字时也属于此类\n"
-        "- chat：闲聊、常识性问题，或你已知可直接回答、不需要联网\n"
-        "- search：需要联网搜索获取实时、最新或不确定的信息\n\n"
-        f"intent 必须是这些值之一：{intent_list}。\n"
-        "file_path 仅 file_read 时填写具体路径，否则为空字符串。\n"
-        "search_query 仅 search 时填写最佳关键词，否则为空字符串。\n"
-        "understanding 填写对用户需求的简要总结。"
-    )
+    prompt = get_intent_registry().classification_prompt(user_message)
     classifier = model_for(ROLE_CLASSIFY).with_structured_output(IntentClassification)
     response = classifier.invoke([SystemMessage(content=prompt)])
     return _normalize_intent(response.model_dump(), user_message)
@@ -77,19 +59,6 @@ def understand_query_node(state: SearchState) -> dict:
     file_path = fields["file_path"]
     understanding = fields["understanding"]
 
-    if intent == "file_read":
-        hint = f"识别为读文件：{file_path or '(未能提取路径)'}"
-    elif intent == "sql":
-        hint = "识别为数据库/SQL 问题，转交 sql_query 工具"
-    elif intent == "math":
-        hint = "识别为数学计算问题，转交 calculate 工具"
-    elif intent == "helix":
-        hint = "需求不够明确，进入 Helix 苏格拉底澄清流程"
-    elif intent == "chat":
-        hint = "识别为闲聊/常识问题，直接回答"
-    else:
-        hint = f"识别为搜索，关键词：{search_query}"
-
     # 注意：节点返回的是“部分状态”字典，会被 LangGraph 合并到 SearchState
     return {
         "user_query": understanding,
@@ -99,7 +68,8 @@ def understand_query_node(state: SearchState) -> dict:
         "retry_count": 0,
         "retry_directive": {},
         "step": "understood",
-        "messages": [AIMessage(content=hint)],
+        # 不再往 messages 里追加“识别为搜索…”之类的进度提示（架构文档 P6）：
+        # 它们会污染下一轮 LLM 上下文。进度展示由 CLI 根据 intent 等字段渲染。
     }
 
 
@@ -149,12 +119,10 @@ def sorcery_answer_node(state: SearchState) -> dict:
 
     retry_directive = result.retry_directive or {}
     search_query = retry_directive.get("search_query")
-    message = result.reason or "当前答案不够理想，准备重试"
     out = {
         "retry_count": retry_count + 1,
         "retry_directive": retry_directive,
         "step": "retry_search",
-        "messages": [AIMessage(content=message)],
     }
     if search_query:
         out["search_query"] = search_query
@@ -162,11 +130,13 @@ def sorcery_answer_node(state: SearchState) -> dict:
 
 
 def _finalize(state: SearchState) -> dict:
-    """sorcery 评估通过 / 重试预算耗尽后的统一收尾：清空 retry_directive 并打 step。"""
+    """sorcery 评估通过 / 重试预算耗尽后的统一收尾：清空 retry_directive 并打 step。
+
+    最终答案已由 answer 节点作为 AIMessage 写入历史，这里不再重复追加（P6）。
+    """
     final_answer = state.get("final_answer", "")
     return {
         "final_answer": final_answer,
         "step": "completed",
         "retry_directive": {},
-        "messages": [AIMessage(content=final_answer)],
     }

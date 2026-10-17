@@ -15,6 +15,8 @@ EXPLICIT_COMPUTE = ("计算", "算式", "算出", "求值", "等于多少")
 
 class MathHandler:
     name = "math"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "明确要求计算数学表达式"
     priority = 25
     bundle_tags = frozenset({"math"})
     max_retries = 0

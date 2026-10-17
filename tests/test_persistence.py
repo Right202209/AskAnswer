@@ -239,3 +239,24 @@ def test_find_by_prefix_requires_min_length(pm):
     pm.upsert_meta("abcd-two", title="b")
     assert len(pm.find_by_prefix("abcd")) == 2
     assert pm.find_by_prefix("ab") == []  # <4 字符直接返回空
+
+
+def test_delete_thread_removes_checkpoints_via_saver_api(pm):
+    """P11：checkpoint 走 SqliteSaver.delete_thread 清理，不按内部表名直删。"""
+    from langgraph.graph import START, StateGraph
+    from typing_extensions import TypedDict
+
+    class S(TypedDict):
+        n: int
+
+    builder = StateGraph(S)
+    builder.add_node("inc", lambda s: {"n": s["n"] + 1})
+    builder.add_edge(START, "inc")
+    app = builder.compile(checkpointer=pm.checkpointer)
+    cfg = {"configurable": {"thread_id": "t-del"}}
+    app.invoke({"n": 1}, config=cfg)
+    pm.upsert_meta("t-del", title="x")
+    assert list(pm.checkpointer.list(cfg))
+    assert pm.delete_thread("t-del") is True
+    assert list(pm.checkpointer.list(cfg)) == []
+    assert pm.get_meta("t-del") is None

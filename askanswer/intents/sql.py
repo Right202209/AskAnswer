@@ -33,6 +33,8 @@ SQL_RE = re.compile(r"(?is)\b(select|insert|update|delete)\b.+\b(from|into|set|w
 
 class SqlHandler:
     name = "sql"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "要求查询数据库、编写 SQL、分析表结构、统计数据库数据"
     priority = 20
     bundle_tags = frozenset({"sql"})
     max_retries = 1

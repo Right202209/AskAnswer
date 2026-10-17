@@ -63,6 +63,7 @@ class IntentClassification(BaseModel):
 
 class IntentHandler(Protocol):
     name: str
+    description: str
     priority: int
     bundle_tags: frozenset[str]
     max_retries: int

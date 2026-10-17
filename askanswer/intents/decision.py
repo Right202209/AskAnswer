@@ -38,6 +38,8 @@ DECISION_KEYWORDS_CN = (
 
 class DecisionHandler:
     name = "decision"
+    # 供 LLM 分类提示使用的一句话描述；分类提示由注册表从各 handler 生成（P5）
+    description = "要在几个方案/方向之间权衡取舍、做选型或决策，需要一份带建议的决策备忘"
     # 介于 sql(20) 与 helix(22) 之间：显式的“决策/选型/权衡”关键词应优先于 Helix
     # 的模糊需求启发式（"做个X"），避免 "帮我做个选型决策" 被 Helix 抢走。
     priority = 21

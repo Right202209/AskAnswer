@@ -114,3 +114,40 @@ def test_confirmation_classes_within_known_set():
     known = {"shell", "fs_write", "external_api_paid"}
     assert set(classes.values()) <= known
     assert set(classes) == set(get_registry().confirmation_names())
+
+
+# ── P13：风险等级 / 能力 / 注册不变量 ──────────────────────────────────
+
+def test_high_risk_tool_without_confirmation_is_rejected():
+    import pytest
+
+    from askanswer.registry import ToolRegistrationError
+
+    for risk in ("write", "exec", "paid"):
+        with pytest.raises(ToolRegistrationError):
+            ToolDescriptor(tool=_FakeTool("w"), tags=frozenset({"chat"}), source="x", risk=risk)
+
+
+def test_seeded_tools_declare_risk_and_capability():
+    reg = get_registry()
+    by_name = {d.tool.name: d for d in reg.descriptors()}
+    assert by_name["write_file"].risk == "write"
+    assert by_name["write_file"].capability == "fs.write"
+    assert by_name["gen_shell_commands_run"].risk == "exec"
+    assert by_name["tavily_search"].capability == "web.search"
+    assert by_name["read_file"].risk == "read"
+    for d in by_name.values():
+        if d.risk in ("write", "exec", "paid"):
+            assert d.confirmation_class != "none"
+
+
+def test_deny_tools_env_hides_tools(monkeypatch):
+    monkeypatch.setenv("ASKANSWER_DENY_TOOLS", "tavily_search, pwd")
+    names = {t.name for t in get_registry().list(tags={"search"})}
+    assert "tavily_search" not in names
+    assert "pwd" not in names
+
+
+def test_list_by_capability():
+    names = {t.name for t in get_registry().list(capabilities={"fs.read", "fs.write"})}
+    assert names == {"read_file", "write_file"}

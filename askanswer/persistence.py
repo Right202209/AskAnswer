@@ -291,10 +291,10 @@ class PersistenceManager:
             return cur.rowcount > 0
 
     def delete_thread(self, thread_id: str, *, tenant_id: str | None = None) -> bool:
-        """同时清掉 SqliteSaver 三张内部表 + thread_meta。
+        """删除会话：checkpoint 走 SqliteSaver 官方 ``delete_thread``，再清自有表。
 
-        SqliteSaver 内部表名按版本可能略有差异；用 try/except 兜底，对没有这张表
-        或没有 thread_id 列的情况静默跳过。
+        不再按表名直接删 checkpointer 的内部表（架构文档 P11）——那会和第三方库的
+        内部表结构绑死，库升级改表名时会静默留下脏数据。
 
         ``tenant_id`` 非 None 时先校验归属：越租户删除直接返回 False，且不动任何
         checkpoint 数据（避免 A 租户删掉 B 租户的会话）。
@@ -303,33 +303,21 @@ class PersistenceManager:
             owner = self.get_meta(thread_id)
             if owner is None or owner.tenant_id != tenant_id:
                 return False
-        existed = False
-        with self._lock, self._conn:
-            # SqliteSaver 内部表：v2 是 checkpoints / writes / checkpoint_blobs
-            for table in ("writes", "checkpoint_blobs", "checkpoints"):
-                try:
-                    self._conn.execute(
-                        f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,)
-                    )
-                except sqlite3.OperationalError:
-                    # 表或列不存在：版本差异导致，忽略
-                    continue
-            cur = self._conn.execute(
-                "DELETE FROM thread_meta WHERE thread_id = ?", (thread_id,)
-            )
-            try:
-                self._conn.execute(
-                    "DELETE FROM audit_event WHERE thread_id = ?", (thread_id,)
+        with self._lock:
+            self._saver.delete_thread(thread_id)
+            with self._conn:
+                cur = self._conn.execute(
+                    "DELETE FROM thread_meta WHERE thread_id = ?", (thread_id,)
                 )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                self._conn.execute(
-                    "DELETE FROM checkpoint_label WHERE thread_id = ?", (thread_id,)
-                )
-            except sqlite3.OperationalError:
-                pass
-            existed = cur.rowcount > 0
+                existed = cur.rowcount > 0
+                for table in ("audit_event", "checkpoint_label"):
+                    try:
+                        self._conn.execute(
+                            f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,)
+                        )
+                    except sqlite3.OperationalError:
+                        # 自有表尚未建（老库 / 功能未启用）：忽略
+                        continue
         return existed
 
     # ── checkpoint labels（/undo 命名点） ────────────────────────────────
