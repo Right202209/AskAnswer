@@ -2,21 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Index only.** This file is a table of contents. Open the linked file under `.claude/mem/` for the section you need — don't expect full context here.
+> **Index only.** Read the linked topic for the task at hand. Paths are relative to the repository root, which contains `pyproject.toml`; `askanswer/` is the Python package directory.
 
 ## Sections
 
-- [Commands & Required env](.claude/mem/commands.md) — **activate `.venv/` before any `python`/`pip`/`askanswer`**; install/run, `--graph` export, env vars (`OPENAI_API_KEY`, `TAVILY_API_KEY`, `WLANGGRAPH_POSTGRES_DSN`, `ASKANSWER_DB_PATH`, …), full slash-command list
-- [Architecture — Orchestration](.claude/mem/architecture-orchestration.md) — main graph topology, `SearchState`, `ContextSchema`, parent nodes, react subgraph, confirmation HITL flow (shell / fs_write / external_api_paid)
-- [Architecture — Extensibility](.claude/mem/architecture-extensibility.md) — `IntentHandler` protocol + `IntentRegistry` priorities, `ToolRegistry` tags & confirmation classes, MCP tool wrapping
-- [Architecture — Subgraphs as tools](.claude/mem/architecture-subgraphs.md) — SQL agent and Helix spec-loop, both exposed via the tool registry with `ToolRuntime` context passthrough
-- [Architecture — Runtime services](.claude/mem/architecture-runtime.md) — `_ModelProxy` hot swap + role routing/fallback, context budget, audit/pricing (multi-provider + cached tokens), SQLite persistence, time travel, MCP client manager, CLI/REPL streaming, UI-free runner + HTTP/SSE server
-- [Conventions](.claude/mem/conventions.md) — partial-dict returns, registry-only tools, lazy persistence, intent extension rules, security boundaries
-- [What's documented elsewhere](.claude/mem/external-docs.md) — `README.md`, `CHANGELOG.md`, `TODO.md`, `AGENTS.md`, `docs/*.md`, bug-risk + CLI-revamp reviews, `web/`
+- [Commands and tests](.claude/mem/commands.md) — environment setup, packaging, linting, full-suite and single-test commands, test isolation.
+- [Architecture and extension points](.claude/mem/architecture.md) — runtime entry points, graph/state flow, intent and tool registries, nested agents, interrupts, persistence, MCP.
+- [Configuration and model calls](.claude/mem/configuration.md) — settings precedence, lazy model proxy, audit/telemetry, context-budget invariants.
 
-## Maintenance rule
+## Maintaining this guidance
 
-When changing project docs:
-1. Edit the relevant `.claude/mem/<topic>.md` — that's where the content lives.
-2. Update the matching line above only if the topic, file path, or one-line hook changed.
-3. `/init` (re)generates this file using the same index-plus-`.claude/mem/` structure; never collapse the content back into a single file.
+Edit the relevant `.claude/mem/` topic rather than duplicating its content here. Keep this index and `AGENTS.md` synchronized when changing topic paths or summaries. Base guidance on the current working tree, not removed CLI/server modules or missing historical documentation.

@@ -9,7 +9,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from ..load import model
-from ..ui_select import CANCELLED, is_interactive, select_option
 from .state import HelixState
 
 # ── 单次工具调用允许的最大演化代数。SQL agent 的 MAX_SQL_QUERY_CALLS 同款思路：
@@ -106,73 +105,22 @@ def _format_seed(seed: dict) -> str:
 
 # ── Nodes ───────────────────────────────────────────────────────────
 
-# ANSI 颜色常量，仅用于 interview 阶段对用户的可视化提示。
-_ORANGE = "\033[38;5;214m"
-_DIM = "\033[2m"
-_BOLD = "\033[1m"
-_GREEN = "\033[38;5;114m"
-_RESET = "\033[0m"
-
-
-def _ask_user(item: InterviewQA) -> str:
-    """对单条 InterviewQA 询问用户：列出选项 + 一个“其他（手动输入）”入口。
-
-    非交互环境（管道、CI）或用户取消时，回落到 LLM 提供的 ``default_answer``。
-    """
-    if not is_interactive():
-        return item.default_answer
-
-    print()
-    print(
-        f"  {_ORANGE}?{_RESET} {_BOLD}[{item.track}]{_RESET} "
-        f"{item.question}"
-    )
-    idx, free_text = select_option(
-        list(item.options),
-        prompt=f"{_DIM}请选择最贴近你诉求的一项：{_RESET}",
-        free_input_label="其他（手动输入）",
-        free_input_prompt="自定义答案：",
-    )
-    if idx == CANCELLED:
-        # 用户跳过：用 default_answer 作为最小风险假设。
-        print(f"  {_DIM}已跳过，使用默认假设：{item.default_answer}{_RESET}")
-        return item.default_answer
-    if free_text is not None:
-        # 命中“其他”：用户有自由输入则采用它，否则回落到默认。
-        answer = free_text.strip() or item.default_answer
-        print(f"  {_GREEN}✓ 你的回答：{_RESET}{answer}")
-        return answer
-    answer = item.options[idx]
-    print(f"  {_GREEN}✓ 已选：{_RESET}{answer}")
-    return answer
-
-
 def interview_node(state: HelixState) -> dict:
-    """苏格拉底式澄清：列出关键歧义并向用户征询答案（含选项 + 手动输入）。"""
+    """生成关键澄清问题，并在无 UI 的 agent 运行中采用最小风险假设。"""
     topic = state.get("topic") or ""
     system = SystemMessage(content=(
         "你是苏格拉底式访谈员。针对用户给出的模糊需求，列出最有杀伤力的关键问题。"
         "覆盖 scope/constraints/outputs/verification 四个歧义轨道，每轨道至少 1 条；"
-        "为每个问题准备 2-5 个常见候选答案，让用户在 CLI 里挑选；"
+        "为每个问题准备 2-5 个常见候选答案；"
         "另给一个最小风险的 default_answer（明确以 'assumption:' 开头标注），"
-        "用于用户跳过或非交互环境时回落。"
+        "用于当前无 UI 的运行路径直接采用。"
     ))
     user = HumanMessage(content=f"用户需求：{topic}")
     output: InterviewOutput = _structured(InterviewOutput).invoke([system, user])
 
-    if is_interactive():
-        # 给用户一个清晰的 “开始访谈” 提示，避免选项菜单突兀地冒出来。
-        print()
-        print(f"  {_BOLD}{_ORANGE}Helix 苏格拉底访谈{_RESET}")
-        print(
-            f"  {_DIM}下面会问 {len(output.qa)} 个澄清问题；每题可上下选项，"
-            f"也可挑“其他（手动输入）”自由作答。{_RESET}"
-        )
-
     qa = []
     for item in output.qa:
-        answer = _ask_user(item)
-        qa.append({"track": item.track, "q": item.question, "a": answer})
+        qa.append({"track": item.track, "q": item.question, "a": item.default_answer})
 
     summary = f"Helix interview 产出 {len(qa)} 条 Q/A，覆盖 "
     summary += ", ".join(sorted({item['track'] for item in qa}))

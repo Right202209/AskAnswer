@@ -86,7 +86,3 @@ class FileReadHandler:
                 reason="read_file failed",
             )
         return pass_result("read_file result looks usable")
-
-    def cli_label(self, update: dict) -> str:
-        file_path = update.get("file_path", "")
-        return f"file_read: {file_path}" if file_path else "file_read"

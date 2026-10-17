@@ -108,6 +108,3 @@ class ResearchHandler:
     def evaluate(self, state: SearchState) -> EvaluationResult:
         # 子图内部已交叉核验；父图仅在完全没产出简报时才可能重试。
         return pass_result("research subgraph self-checks sources")
-
-    def cli_label(self, update: dict) -> str:
-        return "research"

@@ -58,14 +58,16 @@ def test_init_is_idempotent():
 
 
 def test_load_exporters_with_langsmith_env(monkeypatch):
-    """有 LANGSMITH_API_KEY 时尝试构建 exporter；SDK 缺失则 build 返回 None（仍不崩）。"""
+    """有 LANGSMITH_API_KEY 时会尝试装配对应 exporter。"""
     monkeypatch.setenv("LANGSMITH_API_KEY", "ls-fake")
     telemetry._initialized = False
     telemetry._exporters = []
-    # 不真正连接 LangSmith：just确认 init 不抛异常且门控读到了 env 分支
+    monkeypatch.setattr(
+        "askanswer.telemetry.langsmith.build_langsmith_exporter",
+        lambda: object(),
+    )
     telemetry.init_telemetry()
-    # exporter 是否装上取决于 SDK 是否可用；关键是过程不崩、门控逻辑被执行到
-    assert isinstance(telemetry._exporters, list)
+    assert len(telemetry._exporters) == 1
 
 
 def test_extract_tokens_from_usage_metadata():

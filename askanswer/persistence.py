@@ -1,4 +1,4 @@
-# 持久化与线程元数据管理（CLI 单用户场景）。
+# 持久化与线程元数据管理。
 #
 # 设计要点：
 # - 一个 SQLite 文件同时承载两件事：
@@ -6,13 +6,11 @@
 #       ``writes`` / ``checkpoint_blobs``，由 langgraph-checkpoint-sqlite 自管）；
 #   (b) 我们自己的 ``thread_meta`` 表（title / preview / 时间戳 / 计数）。
 #   两者共享同一连接，避免跨 attached DB 的事务复杂度。
-# - 多进程并发：开 WAL + busy_timeout，让两个终端同时跑 askanswer 不会
-#   立刻 ``database is locked``。
+# - 多进程并发：开 WAL + busy_timeout，降低并发运行时的锁冲突。
 # - 模式迁移：用一张独立的 ``askanswer_schema`` 元表记录我们自己的版本号，
 #   不依赖 ``PRAGMA user_version``（避免与 SqliteSaver 未来潜在用法冲突）。
-# - ``--graph`` 只导出 Mermaid 不应触碰持久化：因此本模块完全 lazy，
-#   ``get_persistence()`` 是显式调用入口；``graph.py`` 在导出图时传
-#   ``InMemorySaver`` 绕过本模块。
+# - 本模块完全 lazy，``get_persistence()`` 是显式调用入口；宿主也可向
+#   ``create_search_assistant`` 注入其它 checkpointer 绕过本模块。
 from __future__ import annotations
 
 import json

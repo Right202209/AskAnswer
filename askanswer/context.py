@@ -6,7 +6,7 @@
 报错。本模块提供一个确定性、默认零 LLM 调用、无新依赖的预算器；被裁掉的
 历史可按需生成摘要（brief=确定性拼接 / llm=走 ROLE_SUMMARIZE 路由）。
 
-三条不变量（对齐 docs/important-documentation-d1-routing-context-cost-eval.md）：
+三条不变量：
 1. 默认零回归：``max_tokens=None`` 时原样返回，且不做任何 token 估算（零开销）。
    通过 ``ASKANSWER_CONTEXT_MAX_TOKENS`` 显式开启。
 2. 保留 system 前缀与最新一条：分类/意图提示在 system 里，最后一条是当前轮，

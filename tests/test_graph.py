@@ -55,7 +55,7 @@ def test_building_graph_does_not_create_db(monkeypatch, tmp_path):
 
 
 def test_graph_module_import_has_no_persistence_singleton():
-    """import graph 不应实例化 persistence 单例（get_persistence 只在 CLI 入口触发）。"""
+    """import graph 不应实例化 persistence 单例（仅默认构图时按需触发）。"""
     import askanswer.persistence as persistence
 
     # 干净导入路径下，单例应仍为 None（本测试不调用 get_persistence）

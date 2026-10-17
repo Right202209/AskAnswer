@@ -36,6 +36,3 @@ class MathHandler:
 
     def evaluate(self, state: SearchState) -> EvaluationResult:
         return pass_result("math does not need post-answer evaluation")
-
-    def cli_label(self, update: dict) -> str:
-        return "math"

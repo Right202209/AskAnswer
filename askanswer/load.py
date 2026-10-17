@@ -1,6 +1,6 @@
 # 全局模型/外部客户端加载与热替换。
-# - 通过 _ModelProxy 让所有模块只在启动时导入一次 model，
-#   /model 切换时只替换 proxy 内部的 backend，所有引用自动指向新模型。
+# - 通过 _ModelProxy 让所有模块只在启动时导入一次 model；热替换时只替换
+#   proxy 内部的 backend，所有引用自动指向新模型。
 # - 同时初始化 Tavily 搜索客户端、读取 OpenWeather Key 等运行时常量。
 import os
 
@@ -165,7 +165,7 @@ def _telemetry_callback(model_label: str):
     return telemetry.llm_callback(model_label)
 
 
-# 启动时的默认模型，可以通过 /model 命令运行时替换。
+# 启动时的默认模型，也可以通过 ``set_model`` 在运行时替换。
 # settings.json 的 "model" / env ASKANSWER_DEFAULT_MODEL 可覆盖默认值。
 def _initial_model() -> tuple[str, str]:
     raw = (os.getenv("ASKANSWER_DEFAULT_MODEL") or "openai:gpt-5.4").strip()
@@ -181,7 +181,7 @@ _INITIAL_SPEC, _INITIAL_PROVIDER = _initial_model()
 
 # 模块级单例：所有节点 / 工具都直接 `from .load import model` 使用它。
 # inner=None → 惰性构造：首次调用（invoke/stream/bind_tools…）时才建模型，
-# 使得纯导入（`--graph`、测试、helix_mcp）无需 OPENAI_API_KEY。
+# 使得纯导入无需 OPENAI_API_KEY。
 model = _ModelProxy(None, _INITIAL_SPEC, _INITIAL_PROVIDER)
 
 
@@ -210,7 +210,7 @@ def current_model_label() -> str:
 def raw_backend():
     """返回全局代理**当前**的真实 backend（不带审计包裹）。
 
-    routing 层用它作为「跟随全局 `/model`」角色的候选：拿到的是热替换后的
+    routing 层用它作为「跟随全局模型」角色的候选：拿到的是热替换后的
     最新 backend，回退编排会自己补上审计 callback，避免双重注入。
 
     经 ``_ensure_inner``：惰性初始化未触发时也会构造 backend，避免返回 None。

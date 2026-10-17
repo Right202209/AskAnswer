@@ -1,8 +1,8 @@
-"""Lightweight audit logging for CLI runs.
+"""Lightweight audit logging for agent runs.
 
 The graph should not carry telemetry in ``SearchState``.  This module keeps the
 current run context outside the graph and flushes events into ``audit_event`` at
-the CLI boundary.
+the host-application boundary.
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any
 from urllib.parse import urlparse
 
@@ -23,7 +23,9 @@ _NAME_SAFE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 # 健康探测（list_tools）的超时秒数；超时即判定 server 失联。
 _HEALTH_TIMEOUT = 3.0
-
+# 某些嵌入式运行环境不会可靠唤醒跨线程 asyncio selector；保留一个低频 tick，
+# 让 run_coroutine_threadsafe / call_soon_threadsafe 最迟在该窗口内得到处理。
+_LOOP_TICK_SECONDS = 0.25
 # server 状态取值
 _STATUS_CONNECTED = "connected"
 _STATUS_DISCONNECTED = "disconnected"
@@ -63,11 +65,13 @@ class MCPClientManager:
     def __init__(self) -> None:
         # 后台事件循环 + 守护线程，所有 MCP 协程都在这里跑
         self._loop = asyncio.new_event_loop()
-        self._thread = Thread(target=self._run_loop, name="mcp-loop", daemon=True)
-        self._thread.start()
+        self._loop_started = Event()
         self._servers: dict[str, _ServerEntry] = {}
         self._lock = Lock()
         self._closed = False
+        self._thread = Thread(target=self._run_loop, name="mcp-loop", daemon=True)
+        self._thread.start()
+        self._loop_started.wait(timeout=2.0)
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -286,7 +290,7 @@ class MCPClientManager:
             except Exception:
                 pass
         # 停掉事件循环、等线程退出，最后关闭 loop
-        if self._loop.is_running():
+        if not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread.is_alive():
             self._thread.join(timeout=2.0)
@@ -513,7 +517,14 @@ class MCPClientManager:
     def _run_loop(self) -> None:
         """后台线程主循环：把 self._loop 设成本线程的事件循环并跑起来。"""
         asyncio.set_event_loop(self._loop)
+        self._loop.call_later(_LOOP_TICK_SECONDS, self._loop_tick)
+        self._loop_started.set()
         self._loop.run_forever()
+
+    def _loop_tick(self) -> None:
+        """低频唤醒 selector，兼容跨线程 wakeup 不可靠的嵌入式环境。"""
+        if not self._closed:
+            self._loop.call_later(_LOOP_TICK_SECONDS, self._loop_tick)
 
     def _submit(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """把协程从主线程提交到后台 loop，并阻塞等待结果。"""
@@ -523,7 +534,7 @@ class MCPClientManager:
 
 # ── Module-level singleton helpers ────────────────────────────────
 
-# 单例：整个进程共享一个 MCP 管理器；CLI 退出时由 atexit 关闭
+# 单例：整个进程共享一个 MCP 管理器；宿主退出时可调用 shutdown_manager。
 _manager: MCPClientManager | None = None
 _manager_lock = Lock()
 
@@ -538,7 +549,7 @@ def get_manager() -> MCPClientManager:
 
 
 def shutdown_manager() -> None:
-    """关闭模块级管理器；CLI 通过 atexit 调用。"""
+    """关闭模块级 MCP 管理器。"""
     global _manager
     with _manager_lock:
         mgr, _manager = _manager, None

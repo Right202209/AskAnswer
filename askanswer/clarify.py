@@ -2,8 +2,8 @@
 
 与 ``confirmations`` 同构的一段 HITL：intent handler 通过可选的 ``clarify()`` 声明
 「回答前需要先向用户澄清什么」（缺文件路径、缺数据库 DSN、研究范围不清等），本节点
-在 react 子图入口把它物化成 ``interrupt()``，交给 CLI 用 ui_select 菜单收集选择，
-再把结果并回 SearchState，然后才进入 answer。
+在 react 子图入口把它物化成 ``interrupt()``，由宿主应用收集选择，再把结果并回
+SearchState，然后才进入 answer。
 
 放在独立模块（而非塞进 ``_react_internals``）的原因：让 react 内部聚焦
 answer⇄tools 主循环，也避免该文件继续膨胀。
@@ -32,7 +32,7 @@ from .state import SearchState
 
 # understand 节点把 step 置为该值；澄清只在「首次进入 answer」这一轮触发。
 _FIRST_PASS_STEP = "understood"
-# interrupt 载荷的 type，CLI 据此选择澄清菜单（对齐 confirm_<class> 的约定）。
+# interrupt 载荷的 type，宿主应用据此选择对应的交互方式。
 _INTERRUPT_TYPE = "clarify"
 
 
@@ -50,7 +50,7 @@ def clarify_node(state: SearchState, runtime: Runtime[ContextSchema]) -> dict:
 
 
 def _interrupt_payload(request: ClarificationRequest) -> dict:
-    """把 ClarificationRequest 压成给 CLI 渲染的纯 dict；updates 留在节点侧不外传。"""
+    """把 ClarificationRequest 压成宿主应用可消费的纯 dict。"""
     return {
         "type": _INTERRUPT_TYPE,
         "prompt": request.prompt,
@@ -63,7 +63,7 @@ def _interrupt_payload(request: ClarificationRequest) -> dict:
 
 
 def _resolve(request: ClarificationRequest, decision: Any) -> dict:
-    """把 CLI resume 值 ``{"index","text"}`` 映射成并入 SearchState 的部分字典。"""
+    """把宿主应用传回的 ``{"index","text"}`` 映射成状态更新。"""
     index, text = _read_decision(decision)
     free_slot = len(request.choices)  # 手动输入项恒排在所有 choice 之后
     if request.free_text_field and index == free_slot:
@@ -74,7 +74,7 @@ def _resolve(request: ClarificationRequest, decision: Any) -> dict:
 
 
 def _read_decision(decision: Any) -> tuple[int, str]:
-    """兼容 CLI 传回的 resume 形态，取出 ``(index, free_text)``。"""
+    """解析 resume 形态，取出 ``(index, free_text)``。"""
     if isinstance(decision, dict):
         try:
             index = int(decision.get("index", -1))

@@ -40,7 +40,7 @@
       "mcp_all_intents": true
     }
 
-损坏 / 缺失的文件被静默忽略，不阻塞启动（与 ``mcp_profile`` 一致）。
+损坏或缺失的文件被静默忽略，不阻塞 agent 初始化。
 """
 
 from __future__ import annotations
@@ -206,16 +206,12 @@ def expand_to_env(settings: Mapping[str, Any]) -> dict[str, str]:
         ("tenantId", "ASKANSWER_TENANT_ID"),
         ("db_path", "ASKANSWER_DB_PATH"),
         ("dbPath", "ASKANSWER_DB_PATH"),
-        ("mcp_profile", "ASKANSWER_MCP_PROFILE"),
-        ("mcpProfile", "ASKANSWER_MCP_PROFILE"),
         ("mcp_all_intents", "ASKANSWER_MCP_ALL_INTENTS"),
         ("mcpAllIntents", "ASKANSWER_MCP_ALL_INTENTS"),
         ("run_token_budget", "ASKANSWER_RUN_TOKEN_BUDGET"),
         ("runTokenBudget", "ASKANSWER_RUN_TOKEN_BUDGET"),
         ("db_dialect", "ASKANSWER_DB_DIALECT"),
         ("dbDialect", "ASKANSWER_DB_DIALECT"),
-        ("server_token", "ASKANSWER_SERVER_TOKEN"),
-        ("serverToken", "ASKANSWER_SERVER_TOKEN"),
     ):
         if key in settings:
             text = _stringify(settings[key])
@@ -346,7 +342,7 @@ def _load_dotenv_into(
 
 
 def describe_sources(*, cwd: Path | None = None) -> list[tuple[str, Path, bool]]:
-    """返回 ``(scope, path, exists)`` 列表，供 ``/status`` 或诊断使用。"""
+    """返回 ``(scope, path, exists)`` 列表，供宿主应用诊断配置来源。"""
     root = find_project_root(cwd)
     return [
         ("user", user_settings_path(), user_settings_path().is_file()),

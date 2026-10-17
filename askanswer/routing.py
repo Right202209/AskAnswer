@@ -6,9 +6,9 @@ LLM 调用的形状」。同一个 intent 里会出现多种调用形状 —— 
 需要旗舰模型的推理与工具调用能力。按角色路由让「小模型跑便宜活」成为
 默认可配置项，而不是散落在各节点里的硬编码。
 
-设计约定（对齐 docs/important-documentation-d1-routing-context-cost-eval.md）：
+设计约定：
 - 默认零回归：不设任何环境变量时，所有角色都解析为全局 ``_ModelProxy``，
-  行为与引入本模块之前完全一致；`/model` 热替换继续对全体生效。
+  模型热替换继续对全体生效。
 - 回退链只做「换模型重试」，不做退避重试 —— 单模型内的网络重试已由
   ``init_chat_model(max_retries=3)`` 承担，这里解决的是 provider 级故障。
 - 每次回退写一条 audit 事件（kind="model_fallback"），保证可观测、可复盘。
@@ -56,7 +56,7 @@ def normalize_spec(spec: str) -> str:
 
 @dataclass(frozen=True)
 class ModelRoute:
-    """一个角色的路由：主模型 + 回退链。``spec=None`` 表示跟随全局 `/model`。"""
+    """一个角色的路由：主模型 + 回退链。``spec=None`` 表示跟随全局模型。"""
 
     role: str
     spec: str | None
@@ -135,7 +135,7 @@ def _cached_backend(spec: str) -> tuple[str, object]:
 
 
 def _resolve_backend(spec: str | None) -> tuple[str, object]:
-    """spec=None → 全局代理**当前**的 backend（`/model` 热替换后自动跟随）。"""
+    """spec=None → 全局代理当前的 backend（热替换后自动跟随）。"""
     if spec is None:
         return current_model_label(), raw_backend()
     return _cached_backend(spec)
@@ -252,5 +252,5 @@ def model_for(role: str):
 
 
 def describe_routes() -> dict[str, str]:
-    """当前生效的角色路由表（`/status`、评测报告等诊断场景用）。"""
+    """返回当前生效的角色路由表，供宿主应用诊断。"""
     return get_router().describe()

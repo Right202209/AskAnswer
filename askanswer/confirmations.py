@@ -8,13 +8,13 @@ external_api_paid）各自实现同一套四步协议，react 子图按类分发
    绝不重新调用 LLM（重调不仅多花 token，还可能生成不同的动作导致用户白确认一次）。
 2. ``gate()``   —— 弹确认框之前的安全闸门（shell 危险命令检查、fs_write 敏感路径
    检查等），命中即拦截、根本不打扰用户。
-3. ``interrupt_payload()`` —— 交给 CLI 渲染的载荷，``type`` 固定为
-   ``confirm_<class>``，CLI 据此选择对应的确认菜单。
+3. ``interrupt_payload()`` —— 交给宿主应用的载荷，``type`` 固定为
+   ``confirm_<class>``，宿主据此选择对应的确认方式。
 4. ``apply()``  —— 用户批准后执行。内部必须重新过一遍安全闸门（用户可能编辑过
    内容，如 shell 命令），这是刻意的双重检查，不要省略。
 
 新增确认类 = 在这里实现一个 handler 并加入 ``_HANDLERS``，不要在
-``_react_internals`` / ``cli`` 里加 if/elif 分支（对齐 intent 的扩展方式）。
+``_react_internals`` 里加 if/elif 分支（对齐 intent 的扩展方式）。
 """
 
 from __future__ import annotations
@@ -69,10 +69,10 @@ class ConfirmationOutcome:
     audit_args: dict = field(default_factory=dict)  # 审计 args_summary 的原始字典
 
 
-# ── 决策解析（CLI resume 值 → 结构化结果） ─────────────────────────────
+# ── 决策解析（resume 值 → 结构化结果） ────────────────────────────────
 
 def parse_decision(decision: Any, fallback_command: str) -> tuple[bool, str]:
-    """把 CLI 的 resume 值统一解析成 (approved, command)，shell 类专用（命令可编辑）。"""
+    """把 resume 值统一解析成 (approved, command)，shell 类允许修改命令。"""
     # 直接传 True：批准，沿用旧命令
     if decision is True:
         return True, fallback_command

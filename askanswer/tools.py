@@ -9,7 +9,6 @@ import os
 import platform
 import re
 import shlex
-import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -487,58 +486,11 @@ def gen_shell_command_spec(instruction: str) -> tuple[str, str]:
     return command, explanation
 
 
-# 需要真实 TTY 的全屏/交互程序。bang 模式会继承 stdio；管道捕获模式会直接拒绝。
-# 不含 ssh（常用于非交互远程命令，靠超时兜底）。
-_TTY_PROGRAMS = frozenset({
-    "vi", "vim", "nvim", "nano", "emacs", "emacsclient",
-    "ed", "joe", "micro", "helix", "hx", "ne", "tilde",
-    "less", "more", "most", "view", "hexedit",
-    "top", "htop", "btop", "iotop", "atop",
-    "man", "info",
-    "tmux", "screen",
-})
-
-
-def _first_program(command: str) -> str | None:
-    """取出命令串里的首个可执行程序名（忽略前导 env 赋值）。"""
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        return None
-    i = 0
-    # 跳过 FOO=bar 形式的环境变量赋值
-    while i < len(parts) and "=" in parts[i] and not parts[i].startswith("-"):
-        i += 1
-    if i >= len(parts):
-        return None
-    return Path(parts[i]).name.lower()
-
-
-def command_needs_tty(command: str) -> bool:
-    """命令是否几乎必然需要真实终端（nano/vim/less/top 等）。"""
-    prog = _first_program(command)
-    return prog is not None and prog in _TTY_PROGRAMS
-
-
-def execute_shell_command(
-    command: str,
-    shell: bool = False,
-    *,
-    tty: bool = False,
-) -> str:
+def execute_shell_command(command: str, shell: bool = False) -> str:
     """执行 shell 命令并把 stdout/stderr/返回码包成易读的文本返回。
 
-    ``tty=True``：继承当前进程的 stdin/stdout/stderr，无超时——供 CLI
-    ``!vim`` / ``!nano`` / ``/edit`` 等交互式编辑器用。
-    默认 ``tty=False``：捕获输出、30s 超时，给 agent / 非交互路径用。
+    捕获 stdout/stderr，并对单次调用设置 30 秒超时，适合 agent 的非交互执行路径。
     """
-    # 管道捕获模式下拒绝全屏程序，避免 30s 假死后再超时
-    if not tty and command_needs_tty(command):
-        return (
-            f"命令需要交互式终端（TTY），当前执行模式不支持：{command}\n"
-            f"请在 CLI 中使用 `!{command}` 或 `/edit <path>`。"
-        )
-
     popen_args: str | list[str]
     # shell=False 时用 shlex 拆分参数，避免命令注入；shell=True 时直接交给 /bin/sh
     if shell:
@@ -550,38 +502,15 @@ def execute_shell_command(
             return f"命令解析失败：{exc}\n原始命令：{command}"
 
     try:
-        if tty:
-            # 继承 TTY：用户直接在编辑器里操作，直到退出
-            process = subprocess.Popen(popen_args, shell=shell)
-            try:
-                process.wait()
-            except KeyboardInterrupt:
-                # Ctrl-C：转发给子进程并等待收尸
-                try:
-                    process.send_signal(signal.SIGINT)
-                except Exception:
-                    process.kill()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-                return (
-                    f"命令：{command}\n"
-                    f"返回码：{process.returncode}（被中断）\n"
-                    f"(交互式程序，输出已直通终端)"
-                )
-            stdout, stderr = "", ""
-        else:
-            process = subprocess.Popen(
-                popen_args,
-                shell=shell,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            # 30s 超时：避免误执行长时间运行的命令导致整个图卡住
-            stdout, stderr = process.communicate(timeout=30)
+        process = subprocess.Popen(
+            popen_args,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        # 30s 超时：避免误执行长时间运行的命令导致整个图卡住
+        stdout, stderr = process.communicate(timeout=30)
     except subprocess.TimeoutExpired:
         # 超时后必须 kill + 收尸，否则会有僵尸进程
         process.kill()
@@ -597,9 +526,6 @@ def execute_shell_command(
         f"命令：{command}",
         f"返回码：{process.returncode}（{'成功' if ok else '失败'}）",
     ]
-    if tty:
-        parts.append("(交互式程序，输出已直通终端)")
-        return "\n".join(parts)
     # 输出截断：每路 stream 各 64 KB 上限，防止单条命令的大输出把 prompt 撑爆。
     if stdout:
         parts.append(f"stdout:\n{_truncate_stream(stdout.strip(), 'stdout')}")
@@ -620,7 +546,7 @@ def _truncate_stream(text: str, label: str) -> str:
     return f"{text[:_SHELL_OUTPUT_MAX_BYTES]}\n[{label} 已截断，省略 {omitted} 字符]"
 
 
-# 对外暴露的危险检查别名（_react_internals 与 cli 都会用到）
+# 对外暴露的危险检查别名，供确认执行层复用。
 check_dangerous = _check_dangerous
 
 

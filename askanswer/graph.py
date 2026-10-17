@@ -2,7 +2,6 @@
 #   START → understand → answer → sorcery → (END | answer 重试)
 # 真正的工具调用 / 多轮 react 在 answer 节点（react 子图）内部完成。
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .nodes import sorcery_answer_node, understand_query_node
@@ -26,7 +25,7 @@ def create_search_assistant(checkpointer: BaseCheckpointSaver | None = None):
     :param checkpointer: 显式注入的 checkpointer。
         ``None`` 表示走默认持久化（``persistence.get_persistence().checkpointer``，
         即 ``~/.askanswer/state.db`` 上的 SqliteSaver）。
-        想跳过持久化（如 ``--graph`` 导出 Mermaid、单测）时传 ``InMemorySaver()``。
+        想跳过持久化时可显式传入任意内存 checkpointer。
     """
     # 父图共享 SearchState，并把 ContextSchema 作为运行时上下文 schema
     workflow = StateGraph(SearchState, context_schema=ContextSchema)
@@ -50,19 +49,9 @@ def create_search_assistant(checkpointer: BaseCheckpointSaver | None = None):
     )
 
     if checkpointer is None:
-        # 默认走持久化 SqliteSaver。延迟 import 避免 ``--graph`` 模式无意中
-        # 触发 SQLite 文件创建（draw_search_assistant_mermaid 显式传 InMemorySaver）。
+        # 默认走持久化 SqliteSaver；延迟 import，避免模块导入时创建 SQLite 文件。
         from .persistence import get_persistence
 
         checkpointer = get_persistence().checkpointer
 
     return workflow.compile(checkpointer=checkpointer)
-
-
-def draw_search_assistant_mermaid() -> str:
-    """导出主图的 Mermaid 文本表示，供 ``askanswer --graph`` 使用。
-
-    显式传 ``InMemorySaver`` 避免无谓地在 ``~/.askanswer/state.db`` 创建空 DB。
-    """
-    app = create_search_assistant(checkpointer=InMemorySaver())
-    return app.get_graph().draw_mermaid()

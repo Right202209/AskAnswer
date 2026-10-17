@@ -134,7 +134,7 @@ class ToolRegistry:
     def refresh_mcp(self) -> None:
         """从 MCP 管理器实时同步工具，重建注册表中 mcp 那一片。
 
-        在 ``/mcp <url>`` 连接成功或 ``/mcp remove <name>`` 之后调用。
+        宿主连接、断开或重新探测 MCP 服务后调用。
         健康探测标记为 ``disconnected`` 的 server，其工具会被跳过 —— 避免把已失联
         server 的死工具继续暴露给 LLM；server 恢复后再次 refresh 即可重新出现。
         """
@@ -253,7 +253,7 @@ def _seed_sql(registry: ToolRegistry) -> None:
     try:
         from .sqlagent.sql_tool import sql_query
     except ImportError as exc:
-        # 不抛异常：让其它工具仍然可用，仅在终端给出明确提示
+        # 不抛异常：让其它工具仍然可用，并通过 stderr 给出明确提示
         import sys
         print(f"[askanswer] sql_query 工具加载失败: {exc}", file=sys.stderr)
         print("[askanswer] 请检查 langchain>=1.0 是否已安装", file=sys.stderr)

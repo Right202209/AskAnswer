@@ -1,16 +1,16 @@
-# Graph 运行器：UI 无关的"一腿"事件流（C1 计划中的 runner 先行落地，C3 复用）。
+# Graph 运行器：UI 无关的单段事件流。
 #
-# 事件契约（与 cli.stream_query 的消费口径同源，front-end 只做渲染/编码）：
+# 事件契约（宿主可按需渲染或编码）：
 # - token     LLM 面向用户的增量文本；
 # - tool      LLM 开始规划工具调用（消费者应清空 token 缓冲——规划期文本不属于最终答案，
-#             与 CLI _handle_message_chunk 的 in_tool 语义等价）；
+#             工具规划文本不属于最终答案）；
 # - node      图节点完成（data=原始 update dict，可能含消息对象等非 JSON 值，
-#             由传输层负责裁剪，见 wire.py）；
+#             如需传输由宿主自行裁剪）；
 # - interrupt 图挂起等待人工输入（data=interrupt 载荷，经 resume_input(...) 续跑）；
 # - final     一腿正常结束（text=最终答案，含 state 兜底）。
 #
 # 一"腿"（leg）= 从一次图输入（新问题或 resume 决定）跑到 interrupt 或完成。
-# CLI 在一轮里内联串多腿（当场询问用户）；HTTP 把每腿映射为一次请求/一条 SSE 流。
+# 宿主应用可在收到 interrupt 后收集用户决策，再用 ``resume_input`` 续跑下一段。
 from __future__ import annotations
 
 import os
@@ -31,9 +31,9 @@ EVENT_NODE = "node"
 EVENT_INTERRUPT = "interrupt"
 EVENT_FINAL = "final"
 
-# final_answer 可能出现在这两个父图节点的 update 里（与 cli._on_node_update 口径一致）。
+# final_answer 可能出现在这两个父图节点的 update 里。
 _ANSWER_NODES = frozenset({"answer", "sorcery"})
-# thread_meta.preview 的截断长度（与 cli.stream_query 的 80 字符口径一致）。
+# thread_meta.preview 的截断长度。
 PREVIEW_MAX_CHARS = 80
 
 
@@ -49,7 +49,7 @@ class RunEvent:
 
 
 def runtime_context_from_env() -> ContextSchema:
-    """从环境变量构造 ContextSchema —— 进程边界统一在此注入（CLI/HTTP 共用口径）。"""
+    """从环境变量构造 ContextSchema，供宿主在进程边界注入。"""
     return ContextSchema(
         db_dsn=os.getenv("WLANGGRAPH_POSTGRES_DSN") or None,
         db_dialect=os.getenv("ASKANSWER_DB_DIALECT") or None,
@@ -62,7 +62,7 @@ def thread_config(thread_id: str) -> dict:
 
 
 def query_input(query: str) -> dict:
-    """新问题的图输入（与 CLI 完全一致：单条 HumanMessage）。"""
+    """构造新问题的图输入：单条 HumanMessage。"""
     return {"messages": [HumanMessage(content=query)]}
 
 
@@ -121,8 +121,8 @@ def stream_leg(app, graph_input, *, config, context) -> Iterator[RunEvent]:
 def run_leg(app, graph_input, *, thread_id, context, preview=None) -> Iterator[RunEvent]:
     """带记账的一腿：审计 begin/flush/end + telemetry 根 span + thread_meta 落库。
 
-    记账口径与 cli.stream_query 的 finally 块一致；front-end 只消费事件。
-    HTTP 场景一轮可能拆成多腿（每次 resume 一腿）：审计按腿 flush，同 thread_id 归并；
+    宿主只需消费事件；一轮可能因确认/澄清拆成多段（每次 resume 一段），审计按段
+    flush，并按同一 thread_id 归并；
     resume 腿传 preview=None，upsert_meta 的 COALESCE 语义会保留旧 preview。
     生成器被提前 close（客户端断连）时 finally 仍会执行，记账不丢。
     """
@@ -142,7 +142,7 @@ def run_leg(app, graph_input, *, thread_id, context, preview=None) -> Iterator[R
 
 
 def _message_events(payload, tracker: _LegTracker) -> Iterator[RunEvent]:
-    """messages 通道 → token / tool 事件（口径同 cli._handle_message_chunk）。"""
+    """messages 通道 → token / tool 事件。"""
     if not isinstance(payload, tuple) or len(payload) != 2:
         return
     msg = payload[0]
@@ -233,7 +233,7 @@ def _as_dict(value) -> dict:
 
 
 def _open_span(thread_id, tenant_id):
-    """开一轮请求的 telemetry 根 span；未启用/失败返回 None（口径同 cli._open_root_span）。"""
+    """开一轮请求的 telemetry 根 span；未启用或失败时返回 None。"""
     try:
         from . import telemetry
 
@@ -256,7 +256,7 @@ def _close_span(handle) -> None:
 
 
 def _upsert_thread_meta(thread_id, values, *, context, preview) -> None:
-    """问答后落一行 thread_meta；失败静默（拿到回答比记账更重要，口径同 CLI）。"""
+    """问答后落一行 thread_meta；失败静默，避免记账影响回答。"""
     try:
         from .load import current_model_label
         from .persistence import get_persistence

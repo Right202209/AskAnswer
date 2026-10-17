@@ -10,7 +10,7 @@
   以及 ``ToolRuntime`` 注入（这样 ``sql_query`` 等工具能拿到父图的 ``ContextSchema``）。
 * 注册时设置 ``confirmation_class`` 的工具（shell / fs_write / external_api_paid）
   会先经过 ``_confirm_plan_node`` 按类规划出“要执行的具体动作”写入 state，再由
-  ``_run_with_confirmation`` 通过 ``interrupt()`` 暂停图、交给 CLI 让人类确认。
+  ``_run_with_confirmation`` 通过 ``interrupt()`` 暂停图、交给宿主让人类确认。
   每个确认类的规划/闸门/执行逻辑都在 ``confirmations.py``，这里只做通用分发。
 """
 
@@ -240,8 +240,8 @@ def _run_with_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
             name=tool_call["name"],
         )
 
-    # interrupt() 抛出后，父图的 stream 会看到 __interrupt__ 通道，CLI 按
-    # payload["type"]（confirm_<class>）弹出对应的确认 UI
+    # interrupt() 抛出后，父图的 stream 会看到 __interrupt__ 通道；宿主按
+    # payload["type"]（confirm_<class>）收集确认结果。
     decision = interrupt(handler.interrupt_payload(payload))
     # apply 内部会重新过安全闸门（用户可能编辑过内容），然后才真正执行
     started = time.monotonic()

@@ -1,6 +1,6 @@
 """decision_memo 子图：澄清目标/约束 → 输出 tradeoff memo。
 
-复用 Helix 的 ``interview_node`` 做前置苏格拉底澄清（非 TTY 环境自动回退到每题的
+复用 Helix 的 ``interview_node`` 做前置苏格拉底澄清（采用每题的最小风险
 ``default_answer``），再由 ``decide_node`` 晶化成带取舍分析的决策备忘。刻意**不改父图**，
 仅作为 subgraph-as-tool 暴露；也不在父 sorcery 里重试（``max_retries=0``）。
 """

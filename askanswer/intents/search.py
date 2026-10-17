@@ -103,7 +103,3 @@ class SearchHandler:
             },
             reason="search answer needs retry",
         )
-
-    def cli_label(self, update: dict) -> str:
-        query = update.get("search_query", "")
-        return f"search: {query}" if query else "search"

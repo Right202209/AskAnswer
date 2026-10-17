@@ -42,6 +42,3 @@ class ChatHandler:
 
     def evaluate(self, state: SearchState) -> EvaluationResult:
         return pass_result("chat does not need post-answer evaluation")
-
-    def cli_label(self, update: dict) -> str:
-        return "chat"

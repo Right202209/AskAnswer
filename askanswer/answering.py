@@ -3,7 +3,7 @@
 从 ``_react_internals.py`` 拆出的「回答策略」层 —— 该文件只保留 tools /
 confirm 执行管线。这里集中三件与 LLM 调用形状相关的事：
 
-1. **模型路由**：主推理走 ``model_for(ROLE_ANSWER)``（默认=全局 `/model`，
+1. **模型路由**：主推理走 ``model_for(ROLE_ANSWER)``（默认跟随全局模型，
    可用环境变量配置差异化模型与回退链，见 ``routing.py``）。
 2. **上下文预算**：发送前用 ``context.budget_messages`` 把历史裁进
    ``ASKANSWER_CONTEXT_MAX_TOKENS``（未设置时零开销直通）。

@@ -6,7 +6,7 @@
 - **关闭即零开销**：环境变量未开启时不 import 任何 SDK、不建 client；``emit_event`` /
   ``span`` 退化成一次列表真值判断后立即返回。
 - **不缓存 ``_ModelProxy``**：LLM 回调只在 ``on_llm_end`` 读取响应，从不持有 model
-  引用，避免 ``/model`` 热替换后指向旧 backend。
+  引用，避免模型热替换后指向旧 backend。
 - **与 audit 共享最小事件 schema（kind / tool_name / duration_ms / tokens），写入路径独立**。
 
 启用开关：
@@ -35,7 +35,7 @@ _SPAN_STACK: ContextVar[tuple] = ContextVar("askanswer_telemetry_span_stack", de
 
 
 def init_telemetry() -> None:
-    """按环境变量装配 exporter；重复调用幂等。CLI 启动时调一次即可。"""
+    """按环境变量装配 exporter；重复调用幂等。"""
     global _initialized, _exporters
     if _initialized:
         return

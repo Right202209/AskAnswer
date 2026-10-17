@@ -140,6 +140,3 @@ class HelixHandler:
     def evaluate(self, state: SearchState) -> EvaluationResult:
         # 子图内部已经做过 evaluate 阶段；父图不重复评估。
         return pass_result("helix subgraph self-evaluates")
-
-    def cli_label(self, update: dict) -> str:
-        return "helix"

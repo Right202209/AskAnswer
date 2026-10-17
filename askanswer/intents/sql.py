@@ -82,6 +82,3 @@ class SqlHandler:
                 reason="sql result appears empty",
             )
         return pass_result("sql result looks usable")
-
-    def cli_label(self, update: dict) -> str:
-        return "sql"

@@ -65,6 +65,3 @@ class DecisionHandler:
     def evaluate(self, state: SearchState) -> EvaluationResult:
         # 子图自带 interview + decide；父图不重复评估。
         return pass_result("decision subgraph self-contained")
-
-    def cli_label(self, update: dict) -> str:
-        return "decision"

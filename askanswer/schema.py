@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields
 class ContextSchema:
     # 选用的 LLM 提供方，目前主要为 "openai"
     llm_provider: str = "openai"
-    # 数据库连接串：SQL agent 需要使用，CLI 会从环境变量读取后注入
+    # 数据库连接串：SQL agent 通过宿主传入的运行时上下文读取
     db_dsn: str | None = None
     # 数据库方言：例如 "postgresql"、"mysql"，用于 prompt 中提示生成对应方言的 SQL
     db_dialect: str | None = None

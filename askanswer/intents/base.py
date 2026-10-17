@@ -73,8 +73,6 @@ class IntentHandler(Protocol):
 
     def evaluate(self, state: SearchState) -> EvaluationResult: ...
 
-    def cli_label(self, update: dict) -> str: ...
-
     # 可选能力：handler 可另外实现
     #   ``clarify(self, state, context) -> ClarificationRequest | None``
     # 在 answer 之前请求用户澄清缺失/含糊的信息（缺路径、缺 DSN、范围不清等）。
