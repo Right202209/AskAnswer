@@ -48,9 +48,7 @@ def list_checkpoints(app, thread_id: str, *, limit: int = 50) -> list[Checkpoint
                 step=str(values.get("step") or "—"),
                 message_count=len(messages),
                 created_at=_snapshot_ts(snapshot),
-                pending_confirm=bool(
-                    values.get("pending_confirmations") or values.get("pending_shell")
-                ),
+                pending_confirm=bool(values.get("pending_confirmations")),
                 snapshot=snapshot,
                 checkpoint_id=_snapshot_checkpoint_id(snapshot),
             )
@@ -64,7 +62,6 @@ def rewind_to(app, thread_id: str, index: int) -> RewindResult:
     current_values = getattr(current, "values", {}) or {}
     if (
         current_values.get("pending_confirmations")
-        or current_values.get("pending_shell")
         or _snapshot_has_interrupt(current)
     ):
         raise RuntimeError("当前会话有挂起的确认操作，不能执行 /undo 或 /jump")
@@ -78,7 +75,6 @@ def rewind_to(app, thread_id: str, index: int) -> RewindResult:
     affected = max(current_count - target.message_count, 0)
     values = dict(getattr(target.snapshot, "values", {}) or {})
     values["pending_confirmations"] = {}
-    values["pending_shell"] = {}
     config = {"configurable": {"thread_id": thread_id}}
     _update_state(app, config, values)
     return RewindResult(target=target, affected_messages=affected)
@@ -107,7 +103,6 @@ def fork_thread(
         raise IndexError("checkpoint 序号超出范围")
     values = dict(getattr(checkpoints[index].snapshot, "values", {}) or {})
     values["pending_confirmations"] = {}
-    values["pending_shell"] = {}
 
     new_thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": new_thread_id}}

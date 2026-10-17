@@ -13,7 +13,6 @@
 # CLI 在一轮里内联串多腿（当场询问用户）；HTTP 把每腿映射为一次请求/一条 SSE 流。
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Iterator
 from contextlib import suppress
@@ -53,10 +52,13 @@ class RunEvent:
 
 def runtime_context_from_env() -> ContextSchema:
     """从环境变量构造 ContextSchema —— 进程边界统一在此注入（CLI/HTTP 共用口径）。"""
+    from .config import current_settings
+
+    settings = current_settings()
     return ContextSchema(
-        db_dsn=os.getenv("WLANGGRAPH_POSTGRES_DSN") or None,
-        db_dialect=os.getenv("ASKANSWER_DB_DIALECT") or None,
-        tenant_id=os.getenv("ASKANSWER_TENANT_ID") or None,
+        db_dsn=settings.db_dsn,
+        db_dialect=settings.db_dialect,
+        tenant_id=settings.tenant_id,
     )
 
 

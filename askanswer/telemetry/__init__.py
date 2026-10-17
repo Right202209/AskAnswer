@@ -52,7 +52,9 @@ def _load_exporters() -> list:
         exporter = build_langsmith_exporter()
         if exporter is not None:
             exporters.append(exporter)
-    if os.environ.get("ASKANSWER_OTEL_EXPORTER"):
+    from ..config import current_settings
+
+    if current_settings().otel_exporter:
         from .otel import build_otel_exporter
 
         exporter = build_otel_exporter()

@@ -26,24 +26,23 @@ from langgraph.types import interrupt
 
 from .answering import _emit_tool_telemetry
 from .audit import log_event, summarize_args
-from .confirmations import get_confirmation_handler
-from .registry import get_registry
+from .runtime import Container
 from .schema import ContextSchema
-from .state import SearchState
+from .state import PHASE_TOOL_CALLED, SearchState
 
 
-def _confirm_plan_node(state: SearchState) -> dict:
+def _confirm_plan(c: Container, state: SearchState) -> dict:
     """对需要确认的工具调用，按确认类预先规划动作并写入 ``pending_confirmations``。
 
     通过父图的 checkpointer 持久化下来：之后 ``interrupt()`` + 用户 resume 后
     ``_tools_node`` 直接从 state 里读取已规划好的动作，避免重复调用 LLM
     （否则不仅多花 token，还可能生成不一样的动作导致用户白确认一次）。
     """
-    confirmation_classes = get_registry().confirmation_classes()
+    confirmation_classes = c.tools.confirmation_classes()
     plans: dict = dict(state.get("pending_confirmations") or {})
     for tc in state["messages"][-1].tool_calls:
         clazz = confirmation_classes.get(tc["name"])
-        handler = get_confirmation_handler(clazz)
+        handler = c.confirmations(clazz)
         # 只处理已接入执行体的确认类；未接入的类型由 _tools_node 返回友好错误
         if handler is None:
             continue
@@ -59,17 +58,14 @@ def _confirm_plan_node(state: SearchState) -> dict:
     return {"pending_confirmations": plans}
 
 
-def _tools_node(
-    state: SearchState,
-    runtime: Runtime[ContextSchema],
-) -> dict:
+def _tools(c: Container, state: SearchState) -> dict:
     """工具调用执行节点：把普通工具与需要确认的工具分别派发。"""
-    registry = get_registry()
+    registry = c.tools
     confirmation_classes = registry.confirmation_classes()
     confirmable_names = {
         name
         for name, cls in confirmation_classes.items()
-        if get_confirmation_handler(cls) is not None
+        if c.confirmations(cls) is not None
     }
     last_msg = state["messages"][-1]
     tool_calls = list(getattr(last_msg, "tool_calls", None) or [])
@@ -187,21 +183,21 @@ def _tools_node(
     # 需要确认的调用：ask_approval 节点已逐条拿到用户决定并写入 state，
     # 这里只按决定执行（apply 内部会二次校验），本节点绝不 interrupt。
     for tc in confirm_calls:
-        out_messages.append(_apply_confirmation(tc, state))
+        out_messages.append(_apply_confirmation(c, tc, state))
 
     # 执行完后清空规划缓存，避免下一轮被旧规划影响
     return {"messages": out_messages, "pending_confirmations": {}}
 
 
-def _route_from_answer(state: SearchState):
+def _route_from_answer(c: Container, state: SearchState):
     """answer 节点之后的路由：是否要继续走工具，是否需要 HITL。"""
-    if state["step"] != "tool_called":
+    if state.get("step") != PHASE_TOOL_CALLED:
         return END
-    confirmation_classes = get_registry().confirmation_classes()
+    confirmation_classes = c.tools.confirmation_classes()
     tcs = getattr(state["messages"][-1], "tool_calls", None) or []
     # 只要有一条 tool_call 需要（已接入的）确认，就先去 confirm_plan 把动作规划出来
     if any(
-        get_confirmation_handler(confirmation_classes.get(tc.get("name"))) is not None
+        c.confirmations(confirmation_classes.get(tc.get("name"))) is not None
         for tc in tcs
     ):
         return "confirm_plan"
@@ -238,7 +234,7 @@ def _undecided_ids(state: SearchState) -> list[str]:
     return ids
 
 
-def _ask_approval_node(state: SearchState) -> dict:
+def _ask_approval(c: Container, state: SearchState) -> dict:
     """一次只处理一个待确认项：先过安全闸门，未拦截才 interrupt 询问用户。
 
     本节点只读写 state，没有任何外部副作用 —— 恢复时重跑是安全的。
@@ -249,7 +245,7 @@ def _ask_approval_node(state: SearchState) -> dict:
     call_id = pending[0]
     plans = dict(state.get("pending_confirmations") or {})
     plan = dict(plans[call_id])
-    handler = get_confirmation_handler(plan.get("class"))
+    handler = c.confirmations(plan.get("class"))
     if handler is None:
         plan[_BLOCKED_KEY] = f"未接入的确认类型：{plan.get('class')}"
     else:
@@ -264,15 +260,15 @@ def _ask_approval_node(state: SearchState) -> dict:
     return {"pending_confirmations": plans}
 
 
-def _route_after_approval(state: SearchState) -> str:
+def route_after_approval(state: SearchState) -> str:
     """还有未决定的确认项就继续询问，全部决定后进入执行。"""
     return "ask_approval" if _undecided_ids(state) else "tools"
 
 
-def _apply_confirmation(tool_call: dict, state: SearchState) -> ToolMessage:
+def _apply_confirmation(c: Container, tool_call: dict, state: SearchState) -> ToolMessage:
     """按 ask_approval 记录的决定执行一个确认类工具调用，并写审计。"""
-    clazz = get_registry().confirmation_classes().get(tool_call["name"]) or "shell"
-    handler = get_confirmation_handler(clazz)
+    clazz = c.tools.confirmation_classes().get(tool_call["name"]) or "shell"
+    handler = c.confirmations(clazz)
     plans = state.get("pending_confirmations") or {}
     payload = dict(plans.get(tool_call["id"]) or {})
     blocked = payload.pop(_BLOCKED_KEY, None)
@@ -325,3 +321,35 @@ def _clone_message_with_calls(message: AIMessage, tool_calls: list[dict]) -> AIM
         clone = message.copy()
         clone.tool_calls = list(tool_calls)
         return clone
+
+
+# ── 节点工厂（架构文档 P2 / 3.2：依赖由 container 注入） ─────────────────
+
+def make_confirm_plan_node(c: Container):
+    def confirm_plan(state: SearchState) -> dict:
+        return _confirm_plan(c, state)
+
+    return confirm_plan
+
+
+def make_ask_approval_node(c: Container):
+    def ask_approval(state: SearchState) -> dict:
+        return _ask_approval(c, state)
+
+    return ask_approval
+
+
+def make_tools_node(c: Container):
+    def tools(state: SearchState, runtime: Runtime[ContextSchema]) -> dict:
+        # runtime 参数保留：让 LangGraph 把父图 ContextSchema 放进 contextvar，
+        # ToolNode 内的 ToolRuntime 注入依赖它。
+        return _tools(c, state)
+
+    return tools
+
+
+def make_route_from_answer(c: Container):
+    def route_from_answer(state: SearchState):
+        return _route_from_answer(c, state)
+
+    return route_from_answer

@@ -50,3 +50,20 @@ The react subgraph is now `answer → confirm_plan → ask_approval ⟲ → tool
 - `tools` executes plain tools via `ToolNode` and `apply()`s each confirmable call with its stored
   decision (apply re-validates). It never interrupts. This fixes P9: plain tools and approved
   actions used to run twice when a turn mixed them with an interrupt.
+
+
+## State, container and node factories (2026-10 batch 2, supersedes older paragraphs)
+
+- `SearchState` holds only generic fields: `messages`, `user_query`, `intent`, `slots`, `final_answer`,
+  `retry_count`, `step` (a `Phase` literal: understood / tool_called / completed / retry_search),
+  `retry_directive`, `pending_confirmations`. Intent-specific params (`search_query`, `file_path`, ...)
+  live in `slots`; read with `state.get_slot`, write with `state.with_slots`; clarification updates go
+  through `state.apply_updates` (intent / user_query direct, everything else → slots). Retry
+  directives carry new slot values under `retry_directive["slots"]`.
+- `askanswer/runtime/container.py` is the composition root. Every node is built by a factory —
+  `make_understand_node`, `make_sorcery_node` (nodes.py), `make_clarify_node`, `make_answer_node`,
+  `make_confirm_plan_node`, `make_ask_approval_node`, `make_tools_node`, `make_route_from_answer`.
+  `create_search_assistant(checkpointer, container=None)` / `build_react_subgraph(container)`.
+  Tests inject fakes via `build_container(tools=..., models=..., intents=..., confirmations=...)`.
+- Configuration: `askanswer/config` (typed `Settings`, `load_settings`, `current_settings`, `paths`).
+  Only `config/loader.py` reads ASKANSWER_* env vars (enforced by `tests/test_config.py`).

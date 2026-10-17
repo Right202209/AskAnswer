@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-17 · Architecture refactor batch 2（P2 / P3 / P4，包名保持 askanswer）
+
+### Changed
+- **P4 状态精简**：`SearchState` 只保留通用字段，intent 专用参数（`search_query`、`file_path`…）进 `slots`；`step` 改为 `Phase` 枚举；删除死字段 `search_results` 与旧 `pending_shell`。
+- **P3 类型化配置**：新增 `askanswer/config/`（Pydantic `Settings`、`load_settings`、数据目录 `paths`）。只有 `config/loader.py` 读取 `ASKANSWER_*` 环境变量，测试守护；API key 用 `SecretStr`。
+- **P2 组装根**：新增 `askanswer/runtime/container.py`；所有图节点由 `make_xxx_node(container)` 生成，`create_search_assistant(checkpointer, container=)` 可注入替身，测试不再 monkeypatch 模块全局。
+
+
 ## 2026-10-17 · Architecture refactor batch 1（按《架构重构设计文档》P1–P14 修复，包名保持 askanswer）
 
 ### Fixed

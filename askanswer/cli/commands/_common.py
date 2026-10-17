@@ -3,7 +3,6 @@
 # 放在叶子模块里（不 import 任何 commands 子模块），供所有命令模块复用而不形成环。
 from __future__ import annotations
 
-import os
 import shlex
 import time
 
@@ -33,7 +32,9 @@ def _current_tenant() -> str | None:
     所有按租户过滤的命令（/threads、/audit、/usage、/resume、/delete …）都以它作为
     persistence 调用的 ``tenant_id``，让两个 tenant 在同一 SQLite 文件下互不可见。
     """
-    return os.getenv("ASKANSWER_TENANT_ID") or None
+    from ...config import current_settings
+
+    return current_settings().tenant_id
 
 
 def _resolve_thread(arg: str) -> ThreadMeta | None:

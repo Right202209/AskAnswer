@@ -10,7 +10,6 @@ HITL 流程，而非走普通 ``ToolNode`` 直接执行。
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Literal, Optional
@@ -18,6 +17,7 @@ from typing import Any, Literal, Optional
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, create_model
 
+from .config import current_settings
 from .mcp import get_manager as _mcp_manager
 
 _LOG = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ _SHELL_TAGS = frozenset({TAG_CHAT, TAG_SEARCH, TAG_FILE, "shell"})
 # ASKANSWER_MCP_ALL_INTENTS=1 重新放开（兼容旧行为）。
 # 运行时读取（而非导入时固化），保证 settings.json 注入的值也能生效（P1/P3）。
 def _mcp_tags() -> frozenset[str]:
-    if (os.environ.get("ASKANSWER_MCP_ALL_INTENTS") or "").strip().lower() in {"1", "true", "yes"}:
+    if current_settings().mcp_all_intents:
         return ALL_INTENT_TAGS | frozenset({"mcp", "external_api"})
     return frozenset({TAG_CHAT, "mcp", "external_api"})
 
@@ -79,8 +79,7 @@ CAP_AGENT_RESEARCH = "agent.research"
 CAP_AGENT_DECISION = "agent.decision"
 CAP_MCP = "mcp"
 
-# 用户可通过环境变量（或 settings.json 映射出的同名变量）禁用任意工具，逗号分隔。
-_DENY_TOOLS_ENV = "ASKANSWER_DENY_TOOLS"
+# 用户可通过 ASKANSWER_DENY_TOOLS（或 settings.json 的 env 块）禁用任意工具，逗号分隔。
 
 
 class ToolRegistrationError(ValueError):
@@ -88,8 +87,7 @@ class ToolRegistrationError(ValueError):
 
 
 def denied_tool_names() -> frozenset[str]:
-    raw = os.environ.get(_DENY_TOOLS_ENV) or ""
-    return frozenset(item.strip() for item in raw.split(",") if item.strip())
+    return current_settings().deny_tools
 
 
 @dataclass(frozen=True)

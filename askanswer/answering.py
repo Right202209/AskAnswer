@@ -17,12 +17,17 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .context import answer_token_budget, budget_messages, digest_mode
-from .intents import get_intent_registry
+from .context import budget_messages
 from .load import current_model_label
-from .registry import get_registry
-from .routing import ROLE_ANSWER, model_for
-from .state import SearchState
+from .routing import ROLE_ANSWER
+from .runtime import Container
+from .state import (
+    PHASE_COMPLETED,
+    PHASE_RETRY,
+    PHASE_TOOL_CALLED,
+    PHASE_UNDERSTOOD,
+    SearchState,
+)
 
 _ANTHROPIC_PROVIDER = "anthropic"
 
@@ -55,13 +60,13 @@ def _emit_tool_telemetry(
     )
 
 
-def _reclassify_intent(state: SearchState) -> str | None:
+def _reclassify_intent(container: Container, state: SearchState) -> str | None:
     """根据「最新一条用户消息」重新判定 intent，让会话中途切换主题时也能换工具集。
 
     返回新的 intent 字符串；返回 ``None`` 表示这次不需要切换（例如最新一条不是
     新的真人输入，或本地分类器拿不准）。
     """
-    if state.get("step") in ("retry_search", "understood"):
+    if state.get("step") in (PHASE_RETRY, PHASE_UNDERSTOOD):
         # understood：本轮刚由 understand 节点分类过，没必要再判一次
         # retry_search：sorcery 触发的重试不是新一轮提问，跳过避免反转。
         return None
@@ -72,7 +77,7 @@ def _reclassify_intent(state: SearchState) -> str | None:
     # 工具调用回填的消息不是 HumanMessage，跳过避免在工具链中途切换 intent
     if not isinstance(last, HumanMessage):
         return None
-    fields = get_intent_registry().classify_local(getattr(last, "content", "") or "")
+    fields = container.intents.classify_local(getattr(last, "content", "") or "")
     if fields is None:
         return None
     return fields.intent
@@ -133,11 +138,11 @@ def _answer_output(
     """把 LLM 响应整理成节点返回的部分状态（分「继续调工具」与「产出答案」两路）。"""
     tool_calls = getattr(response, "tool_calls", None) or []
     if tool_calls:
-        out: dict = {"step": "tool_called", "messages": [response]}
+        out: dict = {"step": PHASE_TOOL_CALLED, "messages": [response]}
     else:
         out = {
             "final_answer": response.content,
-            "step": "completed",
+            "step": PHASE_COMPLETED,
             "messages": [response],
         }
     if had_retry_directive:
@@ -148,12 +153,21 @@ def _answer_output(
     return out
 
 
-def _answer_node(state: SearchState) -> dict:
-    """react 主推理节点：路由模型、按预算裁历史、拼 system prompt、调用 LLM。"""
+def make_answer_node(container: Container):
+    """react 主推理节点工厂：模型、工具注册表、intent 注册表、配置均由 container 注入。"""
+
+    def answer(state: SearchState) -> dict:
+        return _answer(container, state)
+
+    return answer
+
+
+def _answer(container: Container, state: SearchState) -> dict:
+    """路由模型、按预算裁历史、拼 system prompt、调用 LLM。"""
     # 中途话题切换的兜底：用户突然从 chat 转到 sql 等，需要切换工具集
-    new_intent = _reclassify_intent(state)
+    new_intent = _reclassify_intent(container, state)
     intent = new_intent or state.get("intent", "search")
-    handler = get_intent_registry().get(intent)
+    handler = container.intents.get(intent)
 
     context_line = handler.prompt_hint(state)
     retry_directive = dict(state.get("retry_directive") or {})
@@ -162,16 +176,17 @@ def _answer_node(state: SearchState) -> dict:
         context_line = f"{context_line}\n\n上一次回答不够，请按以下指引重试：{directive}"
 
     # 从注册表按 handler 的 tag 集合取工具，新增 intent 不必改 registry 常量。
-    bundle_tools = get_registry().list(tags=handler.bundle_tags)
+    bundle_tools = container.tools.list(tags=handler.bundle_tags)
     tool_names = ", ".join(t.name for t in bundle_tools) or "(无)"
 
     # 历史裁剪只影响本次发送的消息，state["messages"] 原样保留（审计/回放不受影响）
+    settings = container.settings
     budgeted = budget_messages(
         list(state["messages"]),
-        max_tokens=answer_token_budget(),
-        digest=digest_mode(),
+        max_tokens=settings.context_max_tokens,
+        digest=settings.context_digest,
     )
-    llm = model_for(ROLE_ANSWER)
+    llm = container.models(ROLE_ANSWER)
     system_msg = _build_system_message(
         provider=_provider_of(llm),
         stable=_stable_block(tool_names),

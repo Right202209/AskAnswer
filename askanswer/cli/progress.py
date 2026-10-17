@@ -92,7 +92,8 @@ def _render_node_update(
             final_answer = update["final_answer"]
         if update.get("step") == "retry_search":
             directive = update.get("retry_directive") or {}
-            nsq = _truncate(update.get("search_query", "") or directive.get("instruction", ""))
+            new_query = (update.get("slots") or {}).get("search_query", "")
+            nsq = _truncate(new_query or directive.get("instruction", ""))
             print(_marker("Sorcery", f"不够好，重搜：{nsq}", elapsed))
         else:
             print(_marker("Sorcery", "通过", elapsed))
@@ -122,8 +123,9 @@ def _intent_cli_label(update: dict) -> str:
 
 def _clarify_detail(update: dict) -> str:
     """把 clarify 节点的 update（并回的字段）翻成一行人类可读的进度说明。"""
-    if update.get("file_path"):
-        return f"文件：{_truncate(update['file_path'], 40)}"
+    file_path = (update.get("slots") or {}).get("file_path")
+    if file_path:
+        return f"文件：{_truncate(file_path, 40)}"
     if update.get("intent"):
         return "改用通用知识作答"
     if update.get("user_query"):

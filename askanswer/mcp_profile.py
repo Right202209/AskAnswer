@@ -29,12 +29,10 @@ def default_profile_path() -> Path:
     优先级与 ``persistence.default_db_path`` 保持一致：
     ``ASKANSWER_MCP_PROFILE`` > ``XDG_DATA_HOME/askanswer`` > ``~/.askanswer``。
     """
-    explicit = os.environ.get("ASKANSWER_MCP_PROFILE")
-    if explicit:
-        return Path(explicit).expanduser()
-    xdg = os.environ.get("XDG_DATA_HOME")
-    base = Path(xdg).expanduser() / "askanswer" if xdg else Path.home() / ".askanswer"
-    return base / _PROFILE_FILENAME
+    from .config import current_settings
+    from .config.paths import mcp_profile_path
+
+    return mcp_profile_path(current_settings(), _PROFILE_FILENAME)
 
 
 def load(path: Path | None = None) -> list[dict]:

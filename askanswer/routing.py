@@ -21,7 +21,6 @@ LLM 调用的形状」。同一个 intent 里会出现多种调用形状 —— 
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from .audit import log_event
@@ -88,15 +87,15 @@ class ModelRouter:
 
 
 def _route_from_env(role: str) -> ModelRoute:
-    spec = os.environ.get(f"{_ROLE_ENV_PREFIX}{role.upper()}", "").strip()
-    raw_fallbacks = os.environ.get(f"{_FALLBACK_ENV_PREFIX}{role.upper()}", "")
-    fallbacks = tuple(
-        normalize_spec(item) for item in raw_fallbacks.split(",") if item.strip()
-    )
+    """路由表来自类型化 Settings（ASKANSWER_MODEL_<ROLE> / _FALLBACKS_<ROLE>）。"""
+    from .config import current_settings
+
+    models = current_settings().models
+    spec = models.spec(role)
     return ModelRoute(
         role=role,
         spec=normalize_spec(spec) if spec else None,
-        fallbacks=fallbacks,
+        fallbacks=tuple(normalize_spec(item) for item in models.fallback_chain(role)),
     )
 
 

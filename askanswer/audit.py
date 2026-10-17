@@ -8,7 +8,6 @@ the CLI boundary.
 from __future__ import annotations
 
 import json
-import os
 import time
 from contextvars import ContextVar, Token
 from typing import Any
@@ -32,7 +31,11 @@ def begin_run(thread_id: str, *, tenant_id: str | None = None) -> tuple[Token, T
     """
     global _FALLBACK_THREAD_ID
     _FALLBACK_THREAD_ID = thread_id
-    tenant = tenant_id if tenant_id is not None else (os.environ.get("ASKANSWER_TENANT_ID") or None)
+    if tenant_id is None:
+        from .config import current_settings
+
+        tenant_id = current_settings().tenant_id
+    tenant = tenant_id
     return (
         _THREAD_ID.set(thread_id),
         _PENDING.set([]),

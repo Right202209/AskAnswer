@@ -4,37 +4,39 @@
 from langgraph.graph import END, START, StateGraph
 
 from ._react_internals import (
-    _ask_approval_node,
-    _confirm_plan_node,
-    _route_after_approval,
-    _route_from_answer,
-    _tools_node,
+    make_ask_approval_node,
+    make_confirm_plan_node,
+    make_route_from_answer,
+    make_tools_node,
+    route_after_approval,
 )
-from .answering import _answer_node
-from .clarify import clarify_node
+from .answering import make_answer_node
+from .clarify import make_clarify_node
+from .runtime import Container, build_container
 from .schema import ContextSchema
 from .state import SearchState
 
 
-def build_react_subgraph():
+def build_react_subgraph(container: Container | None = None):
     """编译 answer ⇄ tools / confirm_plan 这条 ReAct 循环，作为子图返回。
 
     与父图共享 ``SearchState``，因此可以直接通过 ``add_node`` 嵌入。注意 **不**
     传入 checkpointer ——子图按 per-invocation 模式继承父图的 checkpointer，
     这样 HITL 流程里 ``interrupt()`` 抛出的中断才能透传到父级 stream。
     """
+    c = container or build_container()
     builder = StateGraph(SearchState, context_schema=ContextSchema)
     # clarify 节点：answer 之前的通用澄清入口（缺路径/缺 DSN/范围不清时 interrupt 询问），
     # 仅首轮触发、不改父图拓扑；无需澄清时是零成本直通。
-    builder.add_node("clarify", clarify_node)
+    builder.add_node("clarify", make_clarify_node(c))
     # answer 节点：调用 LLM、根据 intent 绑定不同工具集、产出 AIMessage 或 tool_calls
-    builder.add_node("answer", _answer_node)
+    builder.add_node("answer", make_answer_node(c))
     # confirm_plan 节点：在执行需要确认的工具前按确认类规划动作并写入 pending_confirmations
-    builder.add_node("confirm_plan", _confirm_plan_node)
+    builder.add_node("confirm_plan", make_confirm_plan_node(c))
     # ask_approval 节点：一次只 interrupt 询问一个确认项，只读写 state、无副作用
-    builder.add_node("ask_approval", _ask_approval_node)
+    builder.add_node("ask_approval", make_ask_approval_node(c))
     # tools 节点：执行普通工具 + 按已记录的决定执行确认类工具（绝不 interrupt）
-    builder.add_node("tools", _tools_node)
+    builder.add_node("tools", make_tools_node(c))
 
     # 入口先过 clarify，再进 answer
     builder.add_edge(START, "clarify")
@@ -42,7 +44,7 @@ def build_react_subgraph():
     # answer 之后的条件分支：无 tool 调用直接结束；普通工具走 tools；需要确认的走 confirm_plan
     builder.add_conditional_edges(
         "answer",
-        _route_from_answer,
+        make_route_from_answer(c),
         {"confirm_plan": "confirm_plan", "tools": "tools", END: END},
     )
     # 规划完动作后逐项询问；全部有了决定才进入 tools 执行。
@@ -50,7 +52,7 @@ def build_react_subgraph():
     builder.add_edge("confirm_plan", "ask_approval")
     builder.add_conditional_edges(
         "ask_approval",
-        _route_after_approval,
+        route_after_approval,
         {"ask_approval": "ask_approval", "tools": "tools"},
     )
     # 工具执行完总是回到 answer，由 LLM 决定继续调用工具还是输出最终回答

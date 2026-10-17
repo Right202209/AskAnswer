@@ -14,7 +14,7 @@ pip install -e ".[dev]"     # + pytest / ruff
 
 ## 配置
 
-配置由 `load.py` → `settings.bootstrap_environ()` 在导入时装载。支持 **settings.json**（推荐）与 **`.env`**（保底）并存；运行时一切仍落成环境变量，其余代码只读 `os.environ`。
+配置由入口（CLI / HTTP / MCP server）调用 `load.ensure_environ()` 装载，导入任何模块都不会改写环境变量。支持 **settings.json**（推荐）与 **`.env`**（保底）并存；分层结果落成环境变量后，只在 `askanswer/config/loader.py` 解析成类型化的 `Settings`，业务代码只读 `Settings`。
 
 ### 优先级（高 → 低）
 
@@ -275,7 +275,9 @@ askanswer/
 ├── clarify.py           # 意图澄清 interrupt
 ├── confirmations.py     # HITL 确认协议（shell / fs_write / external_api_paid）
 ├── nodes.py             # 父图节点：意图识别、自评回写
-├── state.py / schema.py # SearchState + ContextSchema
+├── state.py / schema.py # SearchState（通用字段 + slots + Phase）+ ContextSchema
+├── config/              # Settings（Pydantic）/ loader（唯一读 env 处）/ paths
+├── runtime/container.py # 组装根：节点由 make_xxx_node(container) 生成
 ├── tools.py / registry.py
 ├── runner.py / wire.py / server.py   # UI-free 事件流 + HTTP/SSE
 ├── persistence.py / timetravel.py / audit.py / pricing.py

@@ -19,10 +19,11 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
 from langchain_core.messages import BaseMessage, SystemMessage
+
+from .config import current_settings
 
 # 每条消息除正文外的固定开销（role 标记、分隔符等），参考 OpenAI 计费口径。
 _PER_MESSAGE_OVERHEAD = 4
@@ -36,8 +37,6 @@ _CJK_RANGES = (
     (0xAC00, 0xD7AF),   # 谚文音节
     (0x3400, 0x4DBF),   # CJK 扩展 A
 )
-_DEFAULT_MAX_TOKENS_ENV = "ASKANSWER_CONTEXT_MAX_TOKENS"
-_SUMMARIZE_ENV = "ASKANSWER_CONTEXT_DIGEST"
 _DIGEST_ITEM_CHARS = 80
 _DIGEST_MAX_ITEMS = 12
 _LLM_DIGEST_MAX_ITEMS = 40
@@ -242,22 +241,10 @@ def budget_messages(
 
 
 def answer_token_budget() -> int | None:
-    """从环境读取 answer 节点的上下文预算；未设置返回 None（不启用裁剪）。"""
-    raw = os.environ.get(_DEFAULT_MAX_TOKENS_ENV, "").strip()
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    return value if value > 0 else None
+    """answer 节点的上下文预算；未设置返回 None（不启用裁剪）。"""
+    return current_settings().context_max_tokens
 
 
 def digest_mode() -> str:
-    """摘要模式：off（默认）/ brief / llm。未识别值一律回退 off（非回归）。"""
-    raw = os.environ.get(_SUMMARIZE_ENV, "").strip().lower()
-    if raw in ("1", "true", "yes", "on", DIGEST_BRIEF):
-        return DIGEST_BRIEF
-    if raw == DIGEST_LLM:
-        return DIGEST_LLM
-    return DIGEST_OFF
+    """摘要模式：off（默认）/ brief / llm。"""
+    return current_settings().context_digest

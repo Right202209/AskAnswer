@@ -20,20 +20,13 @@ from zoneinfo import ZoneInfo
 from langchain_core.tools import tool
 from markitdown import MarkItDown
 
+from .config import current_settings
 from .load import get_tavily_client, openweather_api_key
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = (os.environ.get(name) or "").strip()
-    try:
-        return int(raw) if raw else default
-    except ValueError:
-        return default
-
-
-# 所有外部 HTTP 请求的统一超时（秒），避免网络工具无限挂起（架构文档 P10）。
-HTTP_TIMEOUT_SECONDS = 10
-TAVILY_TIMEOUT_SECONDS = 30
+def _http_timeout() -> float:
+    """外部 HTTP 请求统一超时（秒），避免网络工具无限挂起（P10）。"""
+    return current_settings().limits.http_timeout_seconds
 
 
 @tool
@@ -57,7 +50,7 @@ def check_weather(city: str) -> str:
     url = f"https://api.openweathermap.org/data/2.5/weather?{query}"
 
     try:
-        with urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with urlopen(url, timeout=_http_timeout()) as response:
             data = json.loads(response.read().decode("utf-8"))
 
         # 接口返回 cod 字段表示状态；非 200 视为查询失败
@@ -141,7 +134,7 @@ def convert_currency(amount: float, from_currency: str, to_currency: str) -> str
     url = f"https://open.er-api.com/v6/latest/{base}"
 
     try:
-        with urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with urlopen(url, timeout=_http_timeout()) as response:
             data = json.loads(response.read().decode("utf-8"))
 
         if data.get("result") != "success":
@@ -168,7 +161,7 @@ def lookup_ip(ip: str = "") -> str:
     try:
         # 显式带 UA：部分免费接口会拒绝缺省 UA
         request = Request(url, headers={"User-Agent": "AskAnswer/0.1"})
-        with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with urlopen(request, timeout=_http_timeout()) as response:
             data = json.loads(response.read().decode("utf-8"))
 
         if data.get("error"):
@@ -185,8 +178,7 @@ def lookup_ip(ip: str = "") -> str:
 
 # read_file 返回给模型的最大字符数；超出部分截断并注明（可用环境变量调整）。
 def _read_file_max_chars() -> int:
-    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
-    return _env_int("ASKANSWER_READ_FILE_MAX_CHARS", 60_000)
+    return current_settings().limits.read_file_max_chars
 
 
 @tool
@@ -227,8 +219,7 @@ def markitdown(file_path: str) -> str:
 
 # read_file 安全限制：默认 10 MB，可通过环境变量 ASKANSWER_READ_FILE_MAX_BYTES 调整
 def _read_file_max_bytes() -> int:
-    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
-    return _env_int("ASKANSWER_READ_FILE_MAX_BYTES", 10 * 1024 * 1024)
+    return current_settings().limits.read_file_max_bytes
 
 # 命中即拒绝读取的敏感文件名/扩展（不区分大小写）。
 # 设计：宁可误拒少数同名普通文件，也不能让 LLM 把凭据/密钥读进上下文。
@@ -284,8 +275,7 @@ def _validate_read_path(path: str) -> str | None:
 # write_file 安全限制：默认 1 MB，可通过环境变量 ASKANSWER_WRITE_FILE_MAX_BYTES 调整。
 # 写入内容会随规划一起进入 checkpoint（tool_call args），上限刻意比读取小一个量级。
 def _write_file_max_bytes() -> int:
-    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
-    return _env_int("ASKANSWER_WRITE_FILE_MAX_BYTES", 1024 * 1024)
+    return current_settings().limits.write_file_max_bytes
 # fs_write 确认框里 diff / 预览的最大行数，超出截断
 _WRITE_DIFF_MAX_LINES = 200
 _WRITE_PREVIEW_MAX_LINES = 40
@@ -403,7 +393,7 @@ def tavily_search(query: str) -> str:
             search_depth="basic",
             max_results=5,
             include_answer=True,
-            timeout=TAVILY_TIMEOUT_SECONDS,
+            timeout=current_settings().limits.search_timeout_seconds,
         )
     except Exception as exc:
         return f"搜索失败：{exc}"
@@ -611,8 +601,7 @@ def execute_shell_command(
 
 # 单路 stdout/stderr 的文本上限；超出则截断并附说明，避免拖垮 LLM prompt 与 checkpoint
 def _shell_output_max_bytes() -> int:
-    """运行时读取（而非导入时固化），settings.json 注入的值也能生效（P1/P3）。"""
-    return _env_int("ASKANSWER_SHELL_OUTPUT_MAX_BYTES", 64 * 1024)
+    return current_settings().limits.shell_output_max_bytes
 
 
 def _truncate_stream(text: str, label: str) -> str:

@@ -25,28 +25,37 @@ from typing import Any
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
-from .intents import get_intent_registry
 from .intents.base import ClarificationRequest, get_clarification
+from .runtime import Container
 from .schema import ContextSchema, normalize_context
-from .state import SearchState
+from .state import PHASE_UNDERSTOOD, SearchState, apply_updates
 
 # understand 节点把 step 置为该值；澄清只在「首次进入 answer」这一轮触发。
-_FIRST_PASS_STEP = "understood"
+_FIRST_PASS_STEP = PHASE_UNDERSTOOD
 # interrupt 载荷的 type，CLI 据此选择澄清菜单（对齐 confirm_<class> 的约定）。
 _INTERRUPT_TYPE = "clarify"
 
 
-def clarify_node(state: SearchState, runtime: Runtime[ContextSchema]) -> dict:
-    """react 子图入口：按当前 intent handler 的 ``clarify()`` 决定是否发起澄清。"""
+def make_clarify_node(container: Container):
+    """react 子图入口工厂：intent 注册表由 container 注入。"""
+
+    def clarify(state: SearchState, runtime: Runtime[ContextSchema]) -> dict:
+        return _clarify(container, state, runtime)
+
+    return clarify
+
+
+def _clarify(container: Container, state: SearchState, runtime) -> dict:
+    """按当前 intent handler 的 ``clarify()`` 决定是否发起澄清。"""
     if state.get("step") != _FIRST_PASS_STEP:
         return {}  # 重试轮 / 非首轮：不澄清
-    handler = get_intent_registry().get(state.get("intent", "search"))
+    handler = container.intents.get(state.get("intent", "search"))
     context = normalize_context(getattr(runtime, "context", None))
     request = get_clarification(handler, state, context)
     if request is None:
         return {}  # 该 intent 无需澄清（或未实现 clarify）
     decision = interrupt(_interrupt_payload(request))
-    return _resolve(request, decision)
+    return apply_updates(state, _resolve(request, decision))
 
 
 def _interrupt_payload(request: ClarificationRequest) -> dict:
@@ -63,7 +72,10 @@ def _interrupt_payload(request: ClarificationRequest) -> dict:
 
 
 def _resolve(request: ClarificationRequest, decision: Any) -> dict:
-    """把 CLI resume 值 ``{"index","text"}`` 映射成并入 SearchState 的部分字典。"""
+    """把 CLI resume 值 ``{"index","text"}`` 映射成 updates（通用字段或 slot 名 → 值）。
+
+    由 ``state.apply_updates`` 再拆成部分状态：intent/user_query 直写，其余进 slots。
+    """
     index, text = _read_decision(decision)
     free_slot = len(request.choices)  # 手动输入项恒排在所有 choice 之后
     if request.free_text_field and index == free_slot:

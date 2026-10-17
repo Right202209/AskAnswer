@@ -12,9 +12,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, StateGraph
 from langgraph.types import Command
 
-from askanswer import _react_internals, answering, confirmations
+from askanswer import confirmations
 from askanswer.react import build_react_subgraph
 from askanswer.registry import ToolDescriptor, ToolRegistry
+from askanswer.runtime import build_container
 from askanswer.schema import ContextSchema
 from askanswer.state import SearchState
 
@@ -77,6 +78,7 @@ class _ScriptedModel:
 
 
 def _setup(monkeypatch, tool_calls):
+    """依赖全部通过 Container 注入（P2）：不再 monkeypatch 任何模块全局。"""
     CALLS.clear()
     reg = ToolRegistry()
     reg.register(ToolDescriptor(tool=plain_counter, tags=frozenset({"chat"}), source="builtin"))
@@ -87,17 +89,15 @@ def _setup(monkeypatch, tool_calls):
         )
     )
     handler = _CountingConfirmation()
-    monkeypatch.setattr(_react_internals, "get_registry", lambda: reg)
-    monkeypatch.setattr(answering, "get_registry", lambda: reg)
-    monkeypatch.setattr(
-        _react_internals, "get_confirmation_handler",
-        lambda clazz: handler if clazz == "fake_confirm" else None,
-    )
     model = _ScriptedModel(tool_calls)
-    monkeypatch.setattr(answering, "model_for", lambda role: model)
+    container = build_container(
+        tools=reg,
+        models=lambda role: model,
+        confirmations=lambda clazz: handler if clazz == "fake_confirm" else None,
+    )
 
     builder = StateGraph(SearchState, context_schema=ContextSchema)
-    builder.add_node("answer", build_react_subgraph())
+    builder.add_node("answer", build_react_subgraph(container))
     builder.add_edge(START, "answer")
     app = builder.compile(checkpointer=InMemorySaver())
     return app

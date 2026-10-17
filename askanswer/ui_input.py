@@ -93,12 +93,10 @@ class _SlashCompleter(Completer):
 
 def _history_path() -> Path:
     """复用 ``persistence.default_db_path`` 的目录约定，把 history 放在同级。"""
-    explicit = os.environ.get("ASKANSWER_DB_PATH")
-    if explicit:
-        base = Path(explicit).expanduser().parent
-    else:
-        xdg = os.environ.get("XDG_DATA_HOME")
-        base = Path(xdg).expanduser() / "askanswer" if xdg else Path.home() / ".askanswer"
+    from .config import current_settings
+    from .config.paths import history_dir
+
+    base = history_dir(current_settings())
     base.mkdir(parents=True, exist_ok=True)
     return base / "history"
 

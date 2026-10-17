@@ -2,7 +2,6 @@
 # 关键点：所有缓存都按 DSN 走 lru_cache，避免每次调用都重新连数据库。
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
@@ -19,7 +18,9 @@ _DSN_ENV_VAR = "WLANGGRAPH_POSTGRES_DSN"
 def get_database_uri(context: ContextSchema | dict | None = None) -> str:
     """优先取 context.db_dsn；没有则从环境变量取；都没有就抛错。"""
     runtime_context = normalize_context(context)
-    database_uri = (runtime_context.db_dsn or os.getenv(_DSN_ENV_VAR, "")).strip()
+    from ..config import current_settings
+
+    database_uri = (runtime_context.db_dsn or current_settings().db_dsn or "").strip()
     if not database_uri:
         raise RuntimeError(f"未配置 runtime.context.db_dsn 或 {_DSN_ENV_VAR}")
     return database_uri

@@ -159,7 +159,7 @@ def test_classification_prompt_lists_every_registered_intent():
 
 
 def _search_state():
-    return {"user_query": "q", "search_query": "old", "final_answer": "a", "messages": []}
+    return {"user_query": "q", "slots": {"search_query": "old"}, "final_answer": "a", "messages": []}
 
 
 class _FakeStructured:
@@ -183,7 +183,7 @@ def test_search_evaluate_structured_retry(monkeypatch):
     ))
     result = search.SearchHandler().evaluate(_search_state())
     assert result.decision == "retry"
-    assert result.retry_directive["search_query"] == "better kw"
+    assert result.retry_directive["slots"]["search_query"] == "better kw"
 
 
 def test_search_evaluate_pass_and_duplicate_and_error(monkeypatch):
@@ -198,3 +198,55 @@ def test_search_evaluate_pass_and_duplicate_and_error(monkeypatch):
     ):
         monkeypatch.setattr(search, "model_for", lambda role, v=verdict: _FakeStructured(v))
         assert handler.evaluate(_search_state()).decision == "pass"
+
+
+# ── P4：intent 专用参数进 slots ─────────────────────────────────────────
+
+def test_state_helpers_split_generic_fields_and_slots():
+    from askanswer.state import apply_updates, get_slot, with_slots
+
+    state = {"slots": {"a": 1}}
+    assert get_slot(state, "a") == 1
+    assert get_slot({}, "missing", "d") == "d"
+    assert with_slots(state, b=2) == {"a": 1, "b": 2}
+    assert state["slots"] == {"a": 1}  # 不修改原 state
+    out = apply_updates(state, {"intent": "chat", "file_path": "/tmp/x"})
+    assert out == {"intent": "chat", "slots": {"a": 1, "file_path": "/tmp/x"}}
+
+
+def test_understand_writes_slots_not_flat_fields():
+    from langchain_core.messages import HumanMessage
+
+    from askanswer.nodes import make_understand_node
+    from askanswer.runtime import build_container
+
+    understand = make_understand_node(build_container())
+    out = understand({"messages": [HumanMessage(content="读取 ./data.csv 文件")]})
+    assert out["intent"] == "file_read"
+    assert out["slots"]["file_path"].endswith("data.csv")
+    assert "file_path" not in out and "search_query" not in out
+    assert "messages" not in out  # P6：不追加进度提示
+
+
+def test_sorcery_retry_writes_new_query_into_slots():
+    from askanswer import nodes
+    from askanswer.intents.base import EvaluationResult
+    from askanswer.runtime import build_container
+
+    class _H:
+        max_retries = 2
+
+        def evaluate(self, state):
+            return EvaluationResult(
+                decision="retry",
+                retry_directive={"slots": {"search_query": "new"}, "instruction": "x"},
+            )
+
+    class _R:
+        def get(self, name):
+            return _H()
+
+    sorcery = nodes.make_sorcery_node(build_container(intents=_R()))
+    out = sorcery({"intent": "search", "slots": {"search_query": "old", "k": 1}})
+    assert out["step"] == "retry_search"
+    assert out["slots"] == {"search_query": "new", "k": 1}

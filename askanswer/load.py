@@ -2,7 +2,6 @@
 # - 通过 _ModelProxy 让所有模块只在启动时导入一次 model，
 #   /model 切换时只替换 proxy 内部的 backend，所有引用自动指向新模型。
 # - 同时初始化 Tavily 搜索客户端、读取 OpenWeather Key 等运行时常量。
-import os
 from threading import Lock
 
 from langchain.chat_models import init_chat_model
@@ -198,7 +197,9 @@ def _telemetry_callback(model_label: str):
 # 启动时的默认模型，可以通过 /model 命令运行时替换。
 # settings.json 的 "model" / env ASKANSWER_DEFAULT_MODEL 可覆盖默认值。
 def _initial_model() -> tuple[str, str]:
-    raw = (os.getenv("ASKANSWER_DEFAULT_MODEL") or "openai:gpt-5.4").strip()
+    from .config import current_settings
+
+    raw = current_settings().default_model.strip()
     if ":" in raw:
         provider, spec = raw.split(":", 1)
         provider, spec = provider.strip() or "openai", spec.strip()
@@ -256,10 +257,17 @@ def get_tavily_client():
         from tavily import TavilyClient
 
         ensure_environ()
-        _tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+        from .config import current_settings
+        from .config.schema import Secrets
+
+        api_key = Secrets.reveal(current_settings().secrets.tavily_api_key)
+        _tavily_client = TavilyClient(api_key=api_key)
     return _tavily_client
 
 
 def openweather_api_key() -> str | None:
     """按需读取 OpenWeather Key，未配置时 check_weather 给出友好提示。"""
-    return os.getenv("OPENWEATHER_API_KEY")
+    from .config import current_settings
+    from .config.schema import Secrets
+
+    return Secrets.reveal(current_settings().secrets.openweather_api_key)

@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -32,7 +31,9 @@ _SCHEMA_VERSION = 4
 
 def _default_tenant_id() -> str | None:
     """写入路径未显式给 tenant 时的兜底：读环境变量，缺省为 None（不分租户）。"""
-    return os.environ.get("ASKANSWER_TENANT_ID") or None
+    from .config import current_settings
+
+    return current_settings().tenant_id
 
 
 def default_db_path() -> Path:
@@ -40,12 +41,10 @@ def default_db_path() -> Path:
 
     优先级：``ASKANSWER_DB_PATH`` > ``XDG_DATA_HOME/askanswer`` > ``~/.askanswer``。
     """
-    explicit = os.environ.get("ASKANSWER_DB_PATH")
-    if explicit:
-        return Path(explicit).expanduser()
-    xdg = os.environ.get("XDG_DATA_HOME")
-    base = Path(xdg).expanduser() / "askanswer" if xdg else Path.home() / ".askanswer"
-    return base / "state.db"
+    from .config import current_settings
+    from .config.paths import db_path
+
+    return db_path(current_settings())
 
 
 @dataclass

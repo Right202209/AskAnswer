@@ -50,6 +50,11 @@ class IntentClassification(BaseModel):
     intent: str = Field(default="search")
     file_path: str = ""
     search_query: str = ""
+
+    def to_slots(self) -> dict:
+        """分类结果里的 intent 专用参数 → state.slots（只保留非空项）。"""
+        slots = {"file_path": self.file_path, "search_query": self.search_query}
+        return {k: v for k, v in slots.items() if v}
     understanding: str = ""
 
     @model_validator(mode="after")

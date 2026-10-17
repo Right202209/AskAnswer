@@ -8,7 +8,7 @@ from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
 
 from ..routing import ROLE_EVALUATE, model_for
-from ..state import SearchState
+from ..state import SLOT_SEARCH_QUERY, SearchState, get_slot
 from .base import EvaluationResult, IntentClassification, latest_tool_message, pass_result
 
 
@@ -76,22 +76,22 @@ class SearchHandler:
         return None
 
     def prompt_hint(self, state: SearchState) -> str:
-        search_results = state.get("search_results", "")
-        if not search_results:
-            return "（如需联网信息请调用 tavily_search 工具，否则基于已有知识回答。）"
-        return f"以下是搜索结果，可作为参考：\n{search_results}"
+        query = get_slot(state, SLOT_SEARCH_QUERY)
+        if query:
+            return f"（如需联网信息请调用 tavily_search 工具，建议关键词：{query}；否则基于已有知识回答。）"
+        return "（如需联网信息请调用 tavily_search 工具，否则基于已有知识回答。）"
 
     def evaluate(self, state: SearchState) -> EvaluationResult:
         final_answer = state.get("final_answer", "")
         tool_message = latest_tool_message(state, "tavily_search")
-        search_results = state.get("search_results", "")
+        search_results = ""
         if tool_message is not None:
-            search_results = str(getattr(tool_message, "content", "") or search_results)
+            search_results = str(getattr(tool_message, "content", "") or "")
 
         prompt = (
             "请评估当前答案是否足够好；如果不够好，给出一个更精准的新搜索词。\n"
             f"用户问题：{state.get('user_query', '')}\n"
-            f"当前搜索词：{state.get('search_query', '')}\n"
+            f"当前搜索词：{get_slot(state, SLOT_SEARCH_QUERY)}\n"
             f"当前搜索结果：{search_results}\n"
             f"当前答案：{final_answer}"
         )
@@ -111,18 +111,18 @@ class SearchHandler:
         new_search_query = verdict.new_search_query.strip()
         if not new_search_query:
             return pass_result("retry requested without query")
-        current = str(state.get("search_query", "") or "").strip()
+        current = str(get_slot(state, SLOT_SEARCH_QUERY) or "").strip()
         if new_search_query == current:
             return pass_result("retry query duplicated current query")
         return EvaluationResult(
             decision="retry",
             retry_directive={
-                "search_query": new_search_query,
+                "slots": {SLOT_SEARCH_QUERY: new_search_query},
                 "instruction": f"前一次回答不够理想，请调用 tavily_search 工具用以下关键词重新搜索后再作答：{new_search_query}",
             },
             reason="search answer needs retry",
         )
 
     def cli_label(self, update: dict) -> str:
-        query = update.get("search_query", "")
+        query = get_slot(update, SLOT_SEARCH_QUERY)
         return f"search: {query}" if query else "search"

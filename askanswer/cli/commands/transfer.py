@@ -81,7 +81,6 @@ def handle_import_command(args: str, *, app=None) -> str | None:
     values = dict(payload.get("values") or {})
     values["messages"] = messages
     values["pending_confirmations"] = {}
-    values["pending_shell"] = {}
     new_id = str(uuid.uuid4())
     tenant = _current_tenant()
     try:
@@ -160,7 +159,7 @@ def _thread_export_payload(
     state_values = {
         key: value
         for key, value in values.items()
-        if key not in {"messages", "pending_shell", "pending_confirmations"}
+        if key not in {"messages", "pending_confirmations"}
     }
     return {
         "version": 1,

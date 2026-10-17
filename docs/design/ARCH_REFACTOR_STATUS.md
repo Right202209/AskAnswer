@@ -8,9 +8,9 @@
 | # | 问题 | 现状核对 | 本批处理 | 状态 |
 |---|---|---|---|---|
 | P1 | 导入时副作用 | `load.py` 导入即 `bootstrap_environ()` 改写环境变量、建 Tavily 客户端；默认模型标签导入时固化 | 去掉导入时装载；入口 `ensure_environ()`；客户端/模型标签惰性；工具限额运行时读取 | ✅ 主要部分完成 |
-| P2 | 全局可变单例 | `load.model`、`get_registry()`、`get_persistence()`、intent 注册表均为模块级单例 | 未动（见 §3 第 2 批） | ⏳ |
-| P3 | 配置靠改写 `os.environ` | settings.json 被展开成 env，各模块分散 `os.environ.get` | 导入不再改写；仍以 env 作为配置载体 | 🟡 部分 |
-| P4 | 状态臃肿 | `SearchState` 混有 `search_query/search_results/file_path`，`step` 为自由字符串 | 未动（见 §3 第 2 批） | ⏳ |
+| P2 | 全局可变单例 | `load.model`、`get_registry()`、`get_persistence()`、intent 注册表均为模块级单例 | 第 2 批：`runtime/container.py` 组装根；全部图节点改为 `make_xxx_node(container)` 工厂，节点体不再 import 单例；测试通过 Container 注入替身 | 🟡 图层完成；intent handler 内部的 `model_for` 与持久化仍是进程默认实现 |
+| P3 | 配置靠改写 `os.environ` | settings.json 被展开成 env，各模块分散 `os.environ.get` | 第 1 批：导入不再改写；第 2 批：Pydantic `Settings` + `config/loader.py` 唯一读 env（有测试守护），密钥用 `SecretStr` | ✅（编辑器 `$EDITOR`、LangSmith 等第三方约定变量除外） |
+| P4 | 状态臃肿 | `SearchState` 混有 `search_query/search_results/file_path`，`step` 为自由字符串 | 第 2 批：通用字段 + `slots`；`step` 改为 `Phase` 枚举；删除死字段 `search_results`、旧 `pending_shell` | ✅ |
 | P5 | 扩展点不彻底 | LLM 分类提示写死 6 个 intent，漏了 research / decision | handler 声明 `description`，提示由注册表生成 | ✅ |
 | P6 | 进度提示混进历史 | understand/sorcery 追加提示 `AIMessage`；`_finalize` 重复追加答案 | 全部移除；进度由 CLI 按节点 update 渲染 | ✅ |
 | P7 | 评估靠解析文本 | search 评估找“评分：re_search” | `with_structured_output(SearchVerdict)` | ✅ |
@@ -35,7 +35,7 @@
 
 ## 3. 后续批次（按依赖顺序，每批 pytest 全绿）
 
-1. **第 2 批：状态与组装根**（P2、P4）
+1. **第 2 批：状态与组装根**（P2、P4）—— ✅ 已完成（见上表；剩余：handler.evaluate 的模型改由注入、持久化进 container）
    - `SearchState` 收敛为通用字段 + `turn_slots: dict`，`step` 改为枚举；`search_query/file_path` 迁入 slots，旧 checkpoint 读取时迁移。
    - 新增 `askanswer/runtime/container.py`：显式组装 ModelHub / ToolRegistry / Store，节点改为 `make_xxx_node(container)` 工厂；单测用 `FakeModelFactory`，不再 monkeypatch 模块全局。
    - 类型化 `Settings`（Pydantic）只在 loader 里读 env，其余模块通过注入取配置（完成 P3）。

@@ -17,7 +17,6 @@ import argparse
 import hmac
 import json
 import logging
-import os
 import threading
 import uuid
 from http import HTTPStatus
@@ -119,7 +118,7 @@ class AskAnswerHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and not is_local_origin(origin):
             raise RequestError(HTTPStatus.FORBIDDEN, "cross-origin requests are not allowed")
-        expected = os.getenv(TOKEN_ENV) or ""
+        expected = _server_token()
         if not expected:
             return
         provided = self.headers.get("Authorization") or ""
@@ -258,6 +257,13 @@ class AskAnswerHandler(BaseHTTPRequestHandler):
         _LOG.info("%s %s", self.address_string(), format % args)
 
 
+def _server_token() -> str:
+    from .config import current_settings
+    from .config.schema import Secrets
+
+    return Secrets.reveal(current_settings().secrets.server_token) or ""
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(prog="askanswer-server", description="AskAnswer HTTP/SSE server")
@@ -267,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     from .load import ensure_environ
 
     ensure_environ()  # 入口处显式装载 .env + settings.json
-    if args.host not in LOCAL_HOSTS and not os.getenv(TOKEN_ENV):
+    if args.host not in LOCAL_HOSTS and not _server_token():
         _LOG.warning("绑定非本机地址 %s 且未设置 %s：任何能访问该端口的人都可调用图。", args.host, TOKEN_ENV)
     server = ThreadingHTTPServer((args.host, args.port), AskAnswerHandler)
     server.daemon_threads = True
