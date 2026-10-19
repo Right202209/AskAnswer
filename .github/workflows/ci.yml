@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master, core-agent]
+  pull_request:
+    branches: [master, core-agent]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package with dev tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Lint baseline (E/F/I). Config lives in [tool.ruff] of pyproject.toml.
+      - name: Ruff
+        run: ruff check askanswer tests
+
+      # Suite runs with no API key: LLM/network are mocked, conftest isolates
+      # env vars and opts out of settings/.env bootstrap. Warnings are errors so
+      # deprecations (e.g. a reintroduced langchain-community) fail the build.
+      - name: Pytest
+        run: pytest -W error
+
+      # Importing the library must not modify the process environment or create
+      # state.db (lazy bootstrap invariant). Runs from an empty dir and HOME.
+      - name: Import smoke test
+        run: |
+          mkdir -p "$RUNNER_TEMP/home"
+          cp scripts/import_smoke.py "$RUNNER_TEMP/"
+          cd "$RUNNER_TEMP"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/home" python import_smoke.py

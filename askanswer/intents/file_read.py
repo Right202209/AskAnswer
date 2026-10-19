@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..schema import ContextSchema
-from ..state import SearchState
+from ..config.schema import ContextSchema
+from ..core.state import SearchState
 from .base import (
     ClarificationChoice,
     ClarificationRequest,

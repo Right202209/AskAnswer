@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from ..schema import ContextSchema
-from ..state import SearchState
+from ..config.schema import ContextSchema
+from ..core.state import SearchState
 from .base import (
     ClarificationChoice,
     ClarificationRequest,
@@ -56,7 +56,7 @@ class SqlHandler:
         # 默认项「仍按数据库处理」= 保持现状（sql_query 会因无连接自行报错并回填），
         # 非 TTY 不回归；TTY 下用户可改选「通用知识作答」把 intent 切成 chat。
         return ClarificationRequest(
-            prompt="没检测到数据库连接（未设置 WLANGGRAPH_POSTGRES_DSN）。怎么继续？",
+            prompt="没检测到数据库连接（未设置 ASKANSWER_DB_DSN）。怎么继续？",
             choices=(
                 ClarificationChoice(label="仍按数据库问题处理（无连接可能失败）"),
                 ClarificationChoice(

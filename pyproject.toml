@@ -5,34 +5,54 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "askanswer"
 version = "0.1.0"
-description = "AskAnswer LangGraph agent core"
+description = "Embeddable LangGraph agent core: intent routing, tools, HITL approvals, persistence"
+readme = "README.md"
 requires-python = ">=3.10"
+authors = [{ name = "Right202209" }]
+keywords = ["langgraph", "langchain", "agent", "llm", "human-in-the-loop", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     # --- Orchestration / LLM ---
-    # Used across graph, nodes, tools, subgraphs (import: langchain, langchain_core, langgraph)
+    # Used across core, tools, subagents (import: langchain, langchain_core, langgraph)
     "langchain>=1.0",
     "langchain-core>=0.3.0",
-    "langchain-community>=0.3.0",  # sqlagent (SQLDatabase / SQLDatabaseToolkit)
-    "langchain-openai>=0.3.0",  # default openai provider via init_chat_model (load.py)
+    "langchain-openai>=0.3.0",  # default openai provider via init_chat_model (llm/proxy.py)
     "langgraph>=1.1.5",
     "langgraph-checkpoint-sqlite>=2.0",  # persistence SqliteSaver
     "pydantic>=2.7",  # structured outputs and dynamic tool schemas
+    "sqlalchemy>=2.0",  # SQL subagent: engine, inspection, query execution (subagents/sql)
 
     # --- Tools & protocols ---
     "mcp",  # MCP client integration
-    "tavily-python",  # web search client (load.py → TavilyClient)
-    "markitdown",  # read_file document conversion (tools.py)
+    "tavily-python",  # web search client (tools/builtin.py, built lazily)
+    "markitdown",  # read_file document conversion (tools/filesystem.py, imported lazily)
 
     # --- Runtime config ---
-    "python-dotenv",  # .env loading (load.py)
+    "python-dotenv",  # .env loading (config/settings.py, lazy bootstrap)
 ]
+
+[project.urls]
+Homepage = "https://github.com/Right202209/AskAnswer"
+Repository = "https://github.com/Right202209/AskAnswer"
+Issues = "https://github.com/Right202209/AskAnswer/issues"
+Changelog = "https://github.com/Right202209/AskAnswer/blob/core-agent/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
 ]
-# Soft imports in askanswer/telemetry/* (try/except ImportError → no-op).
+# Soft imports in askanswer/observability/{langsmith,otel}.py (ImportError → no-op).
 # Install when enabling LangSmith / OTEL exporters:
 #   pip install -e ".[telemetry]"
 telemetry = [

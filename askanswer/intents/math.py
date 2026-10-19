@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from ..state import SearchState
+from ..core.state import SearchState
 from .base import EvaluationResult, IntentClassification, pass_result
 
 MATH_RE = re.compile(r"(?<!\w)(?:\d+(?:\.\d+)?\s*[-+*/%()]+[\d\s.+\-*/%()]+)")

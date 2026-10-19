@@ -1,4 +1,10 @@
-"""Runtime registry for intent handlers."""
+"""Runtime registry for intent handlers.
+
+Built-in handlers: ``file_read``, ``sql``, ``decision``, ``helix``, ``math``,
+``research``, ``search``, ``chat`` (checked in ``priority`` order).
+Use :func:`register` to add or replace a handler and :func:`get_intent_registry`
+to inspect them.
+"""
 
 from __future__ import annotations
 
@@ -111,10 +117,12 @@ for _handler in (
 
 
 def get_intent_registry() -> IntentRegistry:
+    """Return the process-wide intent registry."""
     return _registry
 
 
 def register(handler: IntentHandler) -> None:
+    """Register (or replace, by ``name``) an intent handler."""
     _registry.register(handler)
 
 

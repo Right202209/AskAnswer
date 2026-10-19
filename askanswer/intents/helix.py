@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from ..state import SearchState
+from ..core.state import SearchState
 from .base import EvaluationResult, IntentClassification, pass_result
 
 # 中英混合的关键字。粒度刻意偏粗：只要用户语义偏「想先把规格想清楚」就命中。

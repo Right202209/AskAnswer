@@ -1,4 +1,11 @@
-"""Intent handler protocol and shared classification helpers."""
+"""Intent handler protocol and shared classification helpers.
+
+An :class:`IntentHandler` parameterises the fixed parent graph for one intent:
+local (regex / keyword) classification, the prompt hint, the tool tags bound to
+the LLM (``bundle_tags``), post-answer evaluation for ``sorcery`` retries and,
+optionally, a pre-answer ``clarify()`` request.  Register custom handlers with
+:func:`askanswer.intents.register`.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +17,7 @@ from typing import Any, Literal, Protocol
 from langchain_core.messages import ToolMessage
 from pydantic import BaseModel, Field, model_validator
 
-from ..state import SearchState
+from ..core.state import SearchState
 
 Decision = Literal["pass", "retry"]
 
@@ -62,6 +69,11 @@ class IntentClassification(BaseModel):
 
 
 class IntentHandler(Protocol):
+    """Protocol every intent handler implements (see module docstring).
+
+    Optional: ``clarify(state, context) -> ClarificationRequest | None``.
+    """
+
     name: str
     priority: int
     bundle_tags: frozenset[str]

@@ -42,7 +42,9 @@ TAVILY_API_KEY=your-tavily-key
 OPENWEATHER_API_KEY=your-openweather-key
 ```
 
-模型名称使用 `provider:model` 格式。切换提供方时，需要安装对应的 LangChain 集成包并配置其凭据。配置应在导入 `askanswer` 之前准备好。
+模型名称使用 `provider:model` 格式。切换提供方时，需要安装对应的 LangChain 集成包并配置其凭据。完整变量清单见 [.env.example](.env.example) 与 [settings.example.json](settings.example.json)。
+
+`import askanswer` **没有副作用**：不读配置文件、不修改 `os.environ`、不打开数据库、不需要 API key。`.env` 与 settings.json 会在首次使用时惰性加载（`create_search_assistant()`、首次调用模型、`get_persistence()`、`runtime_context_from_env()` 等）。如果宿主只想用进程环境变量与 `ContextSchema` 管理配置，可在最早处调用 `askanswer.config.settings.bootstrap_environ(enabled=False)` 完全关闭文件配置加载。
 
 ### 快速开始
 
@@ -91,7 +93,7 @@ for event in run_leg(
 
 `resume_input` 可从 `askanswer` 导入。恢复后仍可能再次中断，宿主需继续处理。`node` 事件可能包含 LangChain 消息对象；通过网络传输时需由宿主转换为可序列化的数据。
 
-`run_leg()` 同时处理审计、遥测和会话元数据。如果只需要图事件，可使用 `stream_leg(app, graph_input, config=thread_config(thread_id), context=context)`。向 `create_search_assistant(checkpointer=...)` 传入自定义检查点存储可替换默认的图持久化；`run_leg()` 的审计与元数据仍使用内置持久化层。
+`run_leg()` 同时处理审计、遥测和会话元数据。如果只需要图事件，可使用 `stream_leg(app, graph_input, config=thread_config(thread_id), context=context)`。向 `create_search_assistant(checkpointer=...)` 传入自定义检查点存储可替换默认的图持久化：`run_leg()` 只在 `app.checkpointer` 属于内置 `PersistenceManager` 时把审计与元数据写入 SQLite，否则（如 `InMemorySaver()`）使用不落盘的 `NullPersistence`；也可以通过 `run_leg(..., persistence=backend)` 显式指定写入后端。
 
 ### 配置
 
@@ -118,15 +120,15 @@ for event in run_leg(
 
 `models.classify`、`models.evaluate`、`models.summarize` 和 `models.answer` 可分别覆盖角色模型，`models.fallbacks` 可配置各角色的回退列表。上下文裁剪默认关闭；`digest` 支持 `off`、`brief`（确定性摘要）和 `llm`（模型摘要）。`max_tokens` 是基于估算的裁剪目标，会保留系统消息和最新消息。
 
-SQL 工作流通过 `ContextSchema(db_dsn="...", db_dialect="postgresql")` 接收数据库连接配置，也兼容 `WLANGGRAPH_POSTGRES_DSN` 环境变量。需要安装对应的数据库驱动；慢 SQL 统计工具依赖 PostgreSQL 的 `pg_stat_statements`。
+SQL 工作流通过 `ContextSchema(db_dsn="...", db_dialect="postgresql")` 接收数据库连接配置（SQLAlchemy URL），也可用环境变量 `ASKANSWER_DB_DSN`（或 settings.json 的 `db_dsn`）；旧名 `WLANGGRAPH_POSTGRES_DSN` 仍可读取，但会发出 `DeprecationWarning`。底层直接使用 SQLAlchemy（不再依赖 `langchain-community`），需要安装对应的数据库驱动；SQL agent 只允许只读查询；慢 SQL 统计工具依赖 PostgreSQL 的 `pg_stat_statements`。
 
 ### MCP 与扩展
 
-宿主通过 `askanswer.mcp.get_manager()` 获取 MCP 管理器，调用 `add_url()` 或 `add_stdio()` 连接服务，然后调用 `askanswer.registry.get_registry().refresh_mcp()` 同步工具。工具名称采用 `<server>__<tool>` 格式。断开服务或刷新健康状态后，也应重新同步注册表。
+宿主通过 `askanswer.tools.mcp_manager.get_manager()` 获取 MCP 管理器，调用 `add_url()` 或 `add_stdio()` 连接服务，然后调用 `askanswer.tools.get_registry().refresh_mcp()` 同步工具。工具名称采用 `<server>__<tool>` 格式。断开服务或刷新健康状态后，也应重新同步注册表。
 
-MCP 工具默认仅对 `chat` 意图开放；设置 `ASKANSWER_MCP_ALL_INTENTS=1` 可对所有意图开放。应用退出时调用管理器的 `close()` 释放连接。
+MCP 工具默认仅对 `chat` 意图开放；设置 `ASKANSWER_MCP_ALL_INTENTS=1` 可对所有意图开放（每次 `refresh_mcp()` 时读取）。应用退出时调用管理器的 `close()` 释放连接。
 
-新增意图通过 `askanswer.intents.register(handler)` 注册；新增工具通过 `ToolDescriptor` 和 `get_registry().register(...)` 注册。具体接口见 [意图协议](askanswer/intents/base.py) 和 [工具注册表](askanswer/registry.py)。
+新增意图通过 `askanswer.intents.register(handler)` 注册；新增工具通过 `ToolDescriptor` 和 `get_registry().register(...)` 注册。具体接口见 [意图协议](askanswer/intents/base.py) 和 [工具注册表](askanswer/tools/registry.py)。
 
 ### 开发
 
@@ -136,17 +138,21 @@ python -m pytest
 python -m ruff check askanswer tests
 ```
 
-可选遥测依赖通过 `python -m pip install -e ".[telemetry]"` 安装；集成入口见 [telemetry](askanswer/telemetry/__init__.py)。
+可选遥测依赖通过 `python -m pip install -e ".[telemetry]"` 安装（设置 `LANGSMITH_API_KEY` 或 `ASKANSWER_OTEL_EXPORTER` 后首次使用时自动启用）；集成入口见 [observability/telemetry.py](askanswer/observability/telemetry.py)。
 
 | 路径 | 职责 |
 | --- | --- |
-| [askanswer/graph.py](askanswer/graph.py) | 主图：理解 → 回答 → 评估，必要时重试 |
-| [askanswer/runner.py](askanswer/runner.py) | 与 UI 无关的事件流和执行记账 |
+| [askanswer/core/](askanswer/core/) | 主图（理解 → 回答 → 评估）、运行器（事件流与记账）、状态、上下文裁剪、澄清、确认协议、ReAct 子图 |
+| [askanswer/config/](askanswer/config/) | 分层配置与惰性加载、`ContextSchema` |
+| [askanswer/llm/](askanswer/llm/) | 可热替换的全局模型代理、按角色路由与回退 |
 | [askanswer/intents/](askanswer/intents/) | 意图识别、提示、澄清和评估 |
-| [askanswer/registry.py](askanswer/registry.py) | 工具注册、标签筛选与确认类别 |
-| [askanswer/settings.py](askanswer/settings.py) | 分层配置与环境变量映射 |
-| [askanswer/persistence.py](askanswer/persistence.py) | SQLite 检查点、元数据和审计 |
-| [tests/](tests/) | 自动化测试 |
+| [askanswer/tools/](askanswer/tools/) | 工具注册表、内置 / 文件 / shell 工具、MCP 管理与适配 |
+| [askanswer/subagents/](askanswer/subagents/) | SQL、Helix、研究、决策子图与共享访谈节点 |
+| [askanswer/storage/](askanswer/storage/) | SQLite 检查点、会话元数据、审计、schema 迁移、`NullPersistence` |
+| [askanswer/observability/](askanswer/observability/) | 审计缓冲、参数脱敏、LangSmith / OpenTelemetry |
+| [tests/](tests/) | 按包镜像的自动化测试 |
+
+架构评审与重构记录见 [docs/design/ARCH_REVIEW_CORE_AGENT.md](docs/design/ARCH_REVIEW_CORE_AGENT.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## English
 
@@ -184,7 +190,9 @@ TAVILY_API_KEY=your-tavily-key
 OPENWEATHER_API_KEY=your-openweather-key
 ```
 
-Model names use the `provider:model` format. Other providers require the corresponding LangChain integration package and credentials. Prepare configuration before importing `askanswer`.
+Model names use the `provider:model` format. Other providers require the corresponding LangChain integration package and credentials. See [.env.example](.env.example) and [settings.example.json](settings.example.json) for every supported variable.
+
+`import askanswer` has **no side effects**: it reads no configuration files, does not modify `os.environ`, opens no database and needs no API key. `.env` and settings files are loaded lazily on first use (`create_search_assistant()`, the first model call, `get_persistence()`, `runtime_context_from_env()`, …). Hosts that manage configuration purely through process environment variables and `ContextSchema` can call `askanswer.config.settings.bootstrap_environ(enabled=False)` early to opt out of file-based configuration.
 
 ### Quick start
 
@@ -233,7 +241,7 @@ After an interrupt, display the payload and collect the user's response. Call `r
 
 Import `resume_input` from `askanswer`. A resumed leg can interrupt again, so the host must keep handling these events. Node payloads may contain LangChain message objects; the host must convert them to serializable data before network transport.
 
-`run_leg()` also handles audit, telemetry, and thread metadata. For graph events alone, use `stream_leg(app, graph_input, config=thread_config(thread_id), context=context)`. Pass a custom checkpointer to `create_search_assistant(checkpointer=...)` to replace graph persistence; audit and metadata from `run_leg()` still use the built-in persistence layer.
+`run_leg()` also handles audit, telemetry, and thread metadata. For graph events alone, use `stream_leg(app, graph_input, config=thread_config(thread_id), context=context)`. Pass a custom checkpointer to `create_search_assistant(checkpointer=...)` to replace graph persistence. `run_leg()` writes audit and thread metadata to SQLite only when `app.checkpointer` belongs to a built-in `PersistenceManager`; otherwise (e.g. `InMemorySaver()`) it uses `NullPersistence` and nothing touches disk. Pass `run_leg(..., persistence=backend)` to choose the backend explicitly.
 
 ### Configuration
 
@@ -260,15 +268,15 @@ For example, in `.askanswer/settings.json`:
 
 Override individual model roles with `models.classify`, `models.evaluate`, `models.summarize`, and `models.answer`; use `models.fallbacks` for per-role fallback lists. Context trimming is disabled by default. Digest modes are `off`, `brief` (deterministic summary), and `llm` (model-generated summary). `max_tokens` is an estimated trimming target that preserves system messages and the latest message.
 
-SQL workflows accept database configuration through `ContextSchema(db_dsn="...", db_dialect="postgresql")`, with `WLANGGRAPH_POSTGRES_DSN` as an environment fallback. Install the appropriate database driver. Slow-query statistics require PostgreSQL's `pg_stat_statements`.
+SQL workflows accept database configuration through `ContextSchema(db_dsn="...", db_dialect="postgresql")` (a SQLAlchemy URL), or the `ASKANSWER_DB_DSN` environment variable (`db_dsn` in settings.json). The legacy `WLANGGRAPH_POSTGRES_DSN` is still read but emits a `DeprecationWarning`. The SQL subagent uses SQLAlchemy directly (no `langchain-community`); install the appropriate database driver. Only read-only queries are executed. Slow-query statistics require PostgreSQL's `pg_stat_statements`.
 
 ### MCP and extensions
 
-Get the MCP manager through `askanswer.mcp.get_manager()`, connect a server with `add_url()` or `add_stdio()`, then synchronize tools with `askanswer.registry.get_registry().refresh_mcp()`. Tool names use `<server>__<tool>`. Refresh the registry after disconnecting a server or updating its health status as well.
+Get the MCP manager through `askanswer.tools.mcp_manager.get_manager()`, connect a server with `add_url()` or `add_stdio()`, then synchronize tools with `askanswer.tools.get_registry().refresh_mcp()`. Tool names use `<server>__<tool>`. Refresh the registry after disconnecting a server or updating its health status as well.
 
-MCP tools are exposed to the `chat` intent by default. Set `ASKANSWER_MCP_ALL_INTENTS=1` to expose them to all intents. Call the manager's `close()` when your application shuts down.
+MCP tools are exposed to the `chat` intent by default. Set `ASKANSWER_MCP_ALL_INTENTS=1` to expose them to all intents (read on every `refresh_mcp()`). Call the manager's `close()` when your application shuts down.
 
-Register new intents with `askanswer.intents.register(handler)` and tools with `ToolDescriptor` and `get_registry().register(...)`. See the [intent protocol](askanswer/intents/base.py) and [tool registry](askanswer/registry.py) for the interfaces.
+Register new intents with `askanswer.intents.register(handler)` and tools with `ToolDescriptor` and `get_registry().register(...)`. See the [intent protocol](askanswer/intents/base.py) and [tool registry](askanswer/tools/registry.py) for the interfaces.
 
 ### Development
 
@@ -278,14 +286,18 @@ python -m pytest
 python -m ruff check askanswer tests
 ```
 
-Install optional telemetry dependencies with `python -m pip install -e ".[telemetry]"`. See [telemetry](askanswer/telemetry/__init__.py) for integration points.
+Install optional telemetry dependencies with `python -m pip install -e ".[telemetry]"`; exporters turn on at first use when `LANGSMITH_API_KEY` or `ASKANSWER_OTEL_EXPORTER` is set. See [observability/telemetry.py](askanswer/observability/telemetry.py) for integration points.
 
 | Path | Responsibility |
 | --- | --- |
-| [askanswer/graph.py](askanswer/graph.py) | Main graph: understand → answer → evaluate, with retries when needed |
-| [askanswer/runner.py](askanswer/runner.py) | UI-independent event stream and run bookkeeping |
+| [askanswer/core/](askanswer/core/) | Main graph (understand → answer → evaluate), runner (events and bookkeeping), state, context budget, clarification, confirmation protocol, ReAct subgraph |
+| [askanswer/config/](askanswer/config/) | Layered settings with lazy bootstrap, `ContextSchema` |
+| [askanswer/llm/](askanswer/llm/) | Hot-swappable global model proxy, role routing and fallbacks |
 | [askanswer/intents/](askanswer/intents/) | Intent classification, prompts, clarification, and evaluation |
-| [askanswer/registry.py](askanswer/registry.py) | Tool registration, tag filtering, and confirmation classes |
-| [askanswer/settings.py](askanswer/settings.py) | Layered settings and environment mapping |
-| [askanswer/persistence.py](askanswer/persistence.py) | SQLite checkpoints, metadata, and audit |
-| [tests/](tests/) | Automated tests |
+| [askanswer/tools/](askanswer/tools/) | Tool registry, built-in / filesystem / shell tools, MCP manager and adapter |
+| [askanswer/subagents/](askanswer/subagents/) | SQL, Helix, research and decision subgraphs plus the shared interview node |
+| [askanswer/storage/](askanswer/storage/) | SQLite checkpoints, thread metadata, audit, schema migrations, `NullPersistence` |
+| [askanswer/observability/](askanswer/observability/) | Audit buffer, argument redaction, LangSmith / OpenTelemetry |
+| [tests/](tests/) | Automated tests mirroring the package layout |
+
+The architecture review and refactoring record is in [docs/design/ARCH_REVIEW_CORE_AGENT.md](docs/design/ARCH_REVIEW_CORE_AGENT.md); see [CHANGELOG.md](CHANGELOG.md) for changes.
